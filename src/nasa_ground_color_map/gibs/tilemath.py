@@ -29,6 +29,31 @@ class BBox:
         return self.max_lat - self.min_lat
 
 
+def parse_bbox_string(raw: str, max_span_deg: float = 0.0) -> BBox:
+    """Parse and validate 'minLon,minLat,maxLon,maxLat'. Raises ValueError."""
+    parts = raw.split(",")
+    if len(parts) != 4:
+        raise ValueError("bbox must be 'minLon,minLat,maxLon,maxLat'")
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(p) for p in parts)
+    except ValueError:
+        raise ValueError("bbox values must be numbers")
+    if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+        raise ValueError("longitudes must be in [-180, 180]")
+    if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+        raise ValueError("latitudes must be in [-90, 90]")
+    if min_lon >= max_lon:
+        raise ValueError(
+            "minLon must be < maxLon (antimeridian-crossing boxes are not supported; "
+            "split the request at 180°)"
+        )
+    if min_lat >= max_lat:
+        raise ValueError("minLat must be < maxLat")
+    if max_span_deg > 0 and (max_lon - min_lon > max_span_deg or max_lat - min_lat > max_span_deg):
+        raise ValueError(f"bbox span must be <= {max_span_deg} degrees per axis")
+    return BBox(min_lon, min_lat, max_lon, max_lat)
+
+
 @dataclass(frozen=True)
 class TilePlan:
     zoom: int

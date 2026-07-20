@@ -27,6 +27,32 @@ pip install -e ".[dev]"
 CACHE_DIR=./tile-cache uvicorn nasa_ground_color_map.main:app
 ```
 
+## CLI
+
+Installing the package also installs a `ground-color` command that runs the same
+pipeline in-process (no server needed) and **renders the colors right in your
+terminal** — a swatch for single colors, a colored cell grid for matrices, and a
+bare-ground-to-snow ramp for snow cover (24-bit ANSI; auto-disables when piped,
+force with `--color always|never`).
+
+```bash
+pip install .
+
+ground-color color 2,26,6,29                       # Sahara: tan swatch + rgb/hex
+ground-color matrix -117.35,32.5,-116.8,33.15 --rows 12 --cols 12
+ground-color snow -106.9,39.0,-106.0,39.7 --date 2026-01-15 --rows 8 --cols 8
+ground-color layers                                # available layers + latest dates
+```
+
+- `--date YYYY-MM-DD` on any command; omit for the latest available imagery
+  (resolved via GetCapabilities and memoized on disk for 6 h).
+- `--json` prints the same JSON shapes as the API, for scripting.
+- `matrix --hex` also prints the hex values grid; without a color terminal it
+  falls back to hex automatically. Large grids automatically switch to a denser
+  half-block rendering.
+- Tiles share the same disk cache as the server (`CACHE_DIR`, default
+  `~/.cache/nasa-ground-color-map` for the CLI).
+
 ## Endpoints
 
 All endpoints share:

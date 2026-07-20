@@ -19,6 +19,9 @@ dependencies = [
     "tenacity>=8.2",
 ]
 
+[project.scripts]
+ground-color = "nasa_ground_color_map.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
