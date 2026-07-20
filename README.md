@@ -40,16 +40,30 @@ pip install .
 
 ground-color color 2,26,6,29                       # Sahara: tan swatch + rgb/hex
 ground-color matrix -117.35,32.5,-116.8,33.15 --rows 12 --cols 12
+ground-color matrix 92037 --rows 12 --cols 12      # US ZIP codes work anywhere a bbox does
 ground-color snow -106.9,39.0,-106.0,39.7 --date 2026-01-15 --rows 8 --cols 8
+ground-color zip 80435                             # ZIP -> place, centroid, bbox
 ground-color layers                                # available layers + latest dates
 ```
 
+- **ZIP codes**: any command accepts a 5-digit US ZIP in place of a bbox — it is
+  resolved (via the free Zippopotam.us API, cached on disk) to a box extending
+  `--radius-km` (default 5) around the ZIP's centroid. `ground-color zip <code>`
+  prints the resolved place and bbox by itself.
+- **Progress**: while tiles are fetched (or the ~5 MB GIBS catalog is downloaded),
+  a live progress bar with tile counts and cache hits is shown on stderr; it only
+  appears on a terminal and is cleared before results print, so piped/JSON output
+  stays clean.
+- `matrix` renders a map-style frame: lat/lon edge labels, a north indicator,
+  and cells auto-scaled to fill your terminal width. Very large grids switch to
+  a denser half-block rendering.
 - `--date YYYY-MM-DD` on any command; omit for the latest available imagery
   (resolved via GetCapabilities and memoized on disk for 6 h).
 - `--json` prints the same JSON shapes as the API, for scripting.
 - `matrix --hex` also prints the hex values grid; without a color terminal it
-  falls back to hex automatically. Large grids automatically switch to a denser
-  half-block rendering.
+  falls back to hex automatically.
+- A pure-black result triggers a stderr hint (satellite swath gap or night
+  imagery — try an adjacent date or another layer).
 - Tiles share the same disk cache as the server (`CACHE_DIR`, default
   `~/.cache/nasa-ground-color-map` for the CLI).
 

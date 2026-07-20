@@ -44,16 +44,23 @@ class GibsClient:
 
     async def fetch_tile(self, layer: Layer, date: str, zoom: int, row: int, col: int) -> bytes | None:
         """Return tile bytes, or None if the tile is unavailable."""
+        data, _ = await self.fetch_tile_cached(layer, date, zoom, row, col)
+        return data
+
+    async def fetch_tile_cached(
+        self, layer: Layer, date: str, zoom: int, row: int, col: int
+    ) -> tuple[bytes | None, bool]:
+        """Like fetch_tile, but also reports whether the tile came from the disk cache."""
         cached = self.cache.get(layer.id, date, zoom, row, col, layer.ext)
         if cached is not None:
-            return cached
+            return cached, True
         try:
             data = await self._fetch_remote(layer, date, zoom, row, col)
         except Exception as exc:
             logger.warning("tile fetch failed %s/%s z=%d r=%d c=%d: %s", layer.id, date, zoom, row, col, exc)
-            return None
+            return None, False
         self.cache.put(layer.id, date, zoom, row, col, layer.ext, data)
-        return data
+        return data, False
 
     async def _fetch_remote(self, layer: Layer, date: str, zoom: int, row: int, col: int) -> bytes:
         url = self.tile_url(layer, date, zoom, row, col)
@@ -77,10 +84,21 @@ class GibsClient:
 
         return await _get()
 
-    async def fetch_plan(self, layer: Layer, date: str, plan: TilePlan) -> dict[tuple[int, int], bytes | None]:
-        """Fetch every tile in the plan concurrently. Missing tiles map to None."""
+    async def fetch_plan(
+        self, layer: Layer, date: str, plan: TilePlan, on_tile=None
+    ) -> dict[tuple[int, int], bytes | None]:
+        """Fetch every tile in the plan concurrently. Missing tiles map to None.
+
+        on_tile, if given, is called as on_tile(ok, from_cache) as each tile
+        completes — a progress hook for interactive callers.
+        """
         coords = list(plan.tiles())
-        results = await asyncio.gather(
-            *(self.fetch_tile(layer, date, plan.zoom, row, col) for row, col in coords)
-        )
+
+        async def fetch_one(row: int, col: int) -> bytes | None:
+            data, from_cache = await self.fetch_tile_cached(layer, date, plan.zoom, row, col)
+            if on_tile is not None:
+                on_tile(data is not None, from_cache)
+            return data
+
+        results = await asyncio.gather(*(fetch_one(row, col) for row, col in coords))
         return dict(zip(coords, results))

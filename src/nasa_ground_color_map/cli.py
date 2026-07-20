@@ -4,16 +4,23 @@ Runs the same tile-fetch/color pipeline as the API, in-process (no server
 needed), and renders the results as actual colors in the terminal using
 24-bit ANSI escapes: a swatch for single colors, a colored grid for
 matrices, and a brown-to-white ramp for snow cover.
+
+Anywhere a bbox is accepted, a 5-digit US ZIP code works too — it is
+resolved to a bounding box around the ZIP's centroid (see --radius-km).
+While working, transient status lines (tile-fetch progress, capability
+downloads, ZIP lookups) are shown on stderr when it is a terminal.
 """
 
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from pathlib import Path
 
 import httpx
@@ -24,12 +31,52 @@ from .gibs import layers as layer_registry
 from .gibs.cache import TileCache
 from .gibs.capabilities import parse_latest_dates
 from .gibs.client import GibsClient
-from .gibs.tilemath import parse_bbox_string, pixel_deg, plan_tiles
+from .gibs.tilemath import BBox, parse_bbox_string, pixel_deg, plan_tiles
 from .processing import colors, mosaic
 from .processing import snow as snow_mod
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
+
+ZIP_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+ZIP_API = "https://api.zippopotam.us/us"
+
+
+# ---------------------------------------------------------------- progress
+
+class Progress:
+    """Transient single-line status on stderr; no-op unless stderr is a TTY.
+
+    Lines are overwritten in place with \\r and fully cleared before the
+    command prints its results, so piped/JSON output is never polluted.
+    """
+
+    def __init__(self):
+        self.enabled = sys.stderr.isatty()
+        self._width = 0
+
+    def update(self, message: str) -> None:
+        if not self.enabled:
+            return
+        pad = " " * max(0, self._width - len(message))
+        sys.stderr.write(f"\r{message}{pad}")
+        sys.stderr.flush()
+        self._width = len(message)
+
+    def clear(self) -> None:
+        if not self.enabled or not self._width:
+            return
+        sys.stderr.write("\r" + " " * self._width + "\r")
+        sys.stderr.flush()
+        self._width = 0
+
+
+PROGRESS = Progress()
+
+
+def progress_bar(done: int, total: int, width: int = 22) -> str:
+    filled = round(width * done / total) if total else width
+    return "█" * filled + "░" * (width - filled)
 
 
 # ---------------------------------------------------------------- rendering
@@ -55,9 +102,25 @@ def swatch_lines(rgb, width: int = 10, height: int = 3) -> list[str]:
     return [_bg(rgb) + " " * width + RESET for _ in range(height)]
 
 
-def render_matrix(matrix, cell_width: int = 2) -> list[str]:
-    """One terminal line per matrix row; each cell is cell_width bg-colored spaces."""
-    return ["".join(_bg(cell) + " " * cell_width for cell in row) + RESET for row in matrix]
+def fit_cell_size(cols: int, term_width: int) -> tuple[int, int, bool]:
+    """Choose (cell_w, cell_h, half_block) so the grid fills the terminal
+    with roughly square cells (terminal chars are ~1:2 wide:tall). Falls
+    back to the dense half-block mode when even 2-char cells don't fit."""
+    avail = max(16, term_width - 12)  # leave room for the frame's lat gutter
+    cell_w = min(6, avail // cols)
+    if cell_w >= 2:
+        return cell_w, max(1, cell_w // 2), False
+    return 1, 1, True
+
+
+def render_matrix(matrix, cell_width: int = 2, cell_height: int = 1) -> list[str]:
+    """cell_height terminal lines per matrix row; each cell is cell_width
+    bg-colored spaces."""
+    lines = []
+    for row in matrix:
+        line = "".join(_bg(cell) + " " * cell_width for cell in row) + RESET
+        lines.extend([line] * cell_height)
+    return lines
 
 
 def render_matrix_half(matrix) -> list[str]:
@@ -73,6 +136,22 @@ def render_matrix_half(matrix) -> list[str]:
             line += _fg(cell) + (_bg(bottom[j]) if bottom else "") + "▀"
         lines.append(line + RESET)
     return lines
+
+
+def frame_matrix(lines: list[str], box: BBox, grid_width: int, color: bool = True) -> list[str]:
+    """Wrap rendered grid lines in a map-style border: lon labels along the
+    top, lat labels at the corners, and a north indicator."""
+    dim, reset = (DIM, RESET) if color else ("", "")
+    lat_top, lat_bot = f"{box.max_lat:.3f}°", f"{box.min_lat:.3f}°"
+    lon_l, lon_r = f"{box.min_lon:.3f}°", f"{box.max_lon:.3f}°"
+    gutter = max(len(lat_top), len(lat_bot))
+    gap = max(1, grid_width - len(lon_l) - len(lon_r))
+    out = [f"{' ' * (gutter + 2)}{dim}{lon_l}{' ' * gap}{lon_r}{reset}"]
+    out.append(f"{dim}{lat_top:>{gutter}} ╭{'─' * grid_width}╮ N↑{reset}")
+    for line in lines:
+        out.append(f"{' ' * gutter} {dim}│{reset}{line}{dim}│{reset}")
+    out.append(f"{dim}{lat_bot:>{gutter}} ╰{'─' * grid_width}╯{reset}")
+    return out
 
 
 def render_hex_matrix(matrix) -> list[str]:
@@ -131,6 +210,7 @@ def latest_date_cached(settings: Settings, layer_id: str) -> str:
         pass
     layer_ids = {l.id for l in layer_registry.all_layers()}
     try:
+        PROGRESS.update("downloading GIBS layer catalog to find the latest imagery date (~5 MB, cached 6 h)…")
         resp = httpx.get(
             f"{settings.gibs_base_url}/1.0.0/WMTSCapabilities.xml",
             timeout=settings.request_timeout_seconds * 3,
@@ -144,6 +224,7 @@ def latest_date_cached(settings: Settings, layer_id: str) -> str:
         if layer_id in dates:
             return dates[layer_id]
     except Exception as exc:
+        PROGRESS.clear()
         print(f"warning: could not resolve latest date ({exc}); using yesterday", file=sys.stderr)
     return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
@@ -152,19 +233,35 @@ async def sample(settings: Settings, layer, date: str, box, rows: int, cols: int
     """Fetch, stitch and crop — the same pipeline the API routes run."""
     plan = plan_tiles(box, rows, cols, layer.max_zoom, settings.max_tiles_per_request, layer.tile_px)
     cache = TileCache(settings.cache_dir, settings.cache_max_bytes, settings.cache_eviction_check_interval)
+
+    total = plan.tile_count
+    done = cached = 0
+
+    def on_tile(ok: bool, from_cache: bool) -> None:
+        nonlocal done, cached
+        done += 1
+        cached += from_cache
+        note = f", {cached} cached" if cached else ""
+        PROGRESS.update(f"fetching {layer.id} {date}  {progress_bar(done, total)} "
+                        f"{done}/{total} tiles (zoom {plan.zoom}{note})")
+
+    PROGRESS.update(f"fetching {layer.id} {date}  {progress_bar(0, total)} 0/{total} tiles (zoom {plan.zoom})")
     async with httpx.AsyncClient(
         timeout=settings.request_timeout_seconds,
         headers={"User-Agent": settings.user_agent},
         follow_redirects=True,
     ) as http:
         client = GibsClient(settings, cache, http)
-        tiles = await client.fetch_plan(layer, date, plan)
+        tiles = await client.fetch_plan(layer, date, plan, on_tile=on_tile)
     if all(v is None for v in tiles.values()):
+        PROGRESS.clear()
         raise SystemExit(
             f"error: GIBS returned no imagery for {layer.id} on {date} "
             "(date outside coverage, or GIBS unavailable)"
         )
+    PROGRESS.update(f"stitching {plan.n_cols}x{plan.n_rows} tiles and sampling colors…")
     cropped, missing = mosaic.stitch_and_crop(tiles, plan, mode=mode)
+    PROGRESS.clear()
     return cropped, plan, missing
 
 
@@ -175,6 +272,74 @@ def parse_bbox_arg(raw: str, settings: Settings):
         raise SystemExit(f"error: {exc}")
 
 
+def bbox_around(lat: float, lon: float, radius_km: float) -> BBox:
+    """A lat/lon box extending radius_km from a center point on each side."""
+    dlat = radius_km / 110.574
+    dlon = radius_km / (111.320 * max(0.01, math.cos(math.radians(lat))))
+    return BBox(
+        min_lon=max(-180.0, lon - dlon),
+        min_lat=max(-90.0, lat - dlat),
+        max_lon=min(180.0, lon + dlon),
+        max_lat=min(90.0, lat + dlat),
+    )
+
+
+def resolve_zip(zip_arg: str, radius_km: float, settings: Settings) -> tuple[BBox, dict]:
+    """US ZIP code -> (bbox around its centroid, info dict).
+
+    Uses the free Zippopotam.us API; ZIP centroids don't move, so lookups
+    are memoized on disk indefinitely."""
+    code = zip_arg[:5]  # ZIP+4 collapses to the base ZIP
+    cache_file = Path(settings.cache_dir) / "zip_cache.json"
+    known: dict = {}
+    try:
+        known = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        pass
+    info = known.get(code)
+    if info is None:
+        PROGRESS.update(f"looking up ZIP {code}…")
+        try:
+            resp = httpx.get(
+                f"{ZIP_API}/{code}",
+                timeout=settings.request_timeout_seconds,
+                headers={"User-Agent": settings.user_agent},
+                follow_redirects=True,
+            )
+        except httpx.HTTPError as exc:
+            raise SystemExit(f"error: ZIP lookup failed ({exc})")
+        if resp.status_code == 404:
+            raise SystemExit(f"error: unknown US ZIP code '{code}'")
+        if resp.status_code != 200:
+            raise SystemExit(f"error: ZIP lookup failed (HTTP {resp.status_code})")
+        place = resp.json()["places"][0]
+        info = {
+            "zip": code,
+            "place": place["place name"],
+            "state": place["state abbreviation"],
+            "lat": float(place["latitude"]),
+            "lon": float(place["longitude"]),
+        }
+        known[code] = info
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(known))
+        except OSError:
+            pass
+    return bbox_around(info["lat"], info["lon"], radius_km), info
+
+
+def parse_area_arg(raw: str, radius_km: float, settings: Settings) -> tuple[BBox, dict | None]:
+    """The positional area argument accepts a bbox string or a US ZIP code."""
+    if ZIP_RE.match(raw):
+        return resolve_zip(raw, radius_km, settings)
+    return parse_bbox_arg(raw, settings), None
+
+
+def place_label(info: dict) -> str:
+    return f"{info['place']}, {info['state']} (ZIP {info['zip']})"
+
+
 def resolve_truecolor_layer(layer_id: str | None):
     if layer_id is None:
         return layer_registry.DEFAULT_TRUECOLOR
@@ -183,6 +348,18 @@ def resolve_truecolor_layer(layer_id: str | None):
         valid = ", ".join(l.id for l in layer_registry.TRUECOLOR_LAYERS)
         raise SystemExit(f"error: unknown layer '{layer_id}'; valid: {valid}")
     return layer
+
+
+def warn_if_all_black(cells) -> None:
+    """A pure-black true-color result is almost never real ground — it's a
+    satellite swath gap or night-side imagery. Say so instead of leaving the
+    user staring at a black square."""
+    if all(tuple(c) == (0, 0, 0) for c in cells):
+        print(
+            "note: result is pure black — likely a satellite swath gap or night imagery "
+            "for this date/area; try an adjacent --date or another --layer (see 'layers')",
+            file=sys.stderr,
+        )
 
 
 def source_info(plan, missing, layer) -> dict:
@@ -199,18 +376,21 @@ def source_info(plan, missing, layer) -> dict:
 
 def cmd_color(args) -> None:
     settings = build_settings()
-    box = parse_bbox_arg(args.bbox, settings)
+    box, place = parse_area_arg(args.bbox, args.radius_km, settings)
     layer = resolve_truecolor_layer(args.layer)
     date, resolved_from = resolve_date(args.date, layer.id, settings)
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, 1, 1, "RGB"))
     rgb = colors.average(cropped)
     hex_code = colors.rgb_to_hex(rgb)
     if args.json:
-        print(json.dumps({
+        payload = {
             "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
             "date": date, "date_resolved_from": resolved_from, "layer": layer.id,
             "rgb": list(rgb), "hex": hex_code, "source": source_info(plan, missing, layer),
-        }))
+        }
+        if place:
+            payload["zip"] = place
+        print(json.dumps(payload))
         return
     color = use_color(args.color)
     info = [
@@ -218,63 +398,80 @@ def cmd_color(args) -> None:
         f"hex  {hex_code}",
         f"date {date}" + (" (latest)" if resolved_from == "latest" else ""),
     ]
+    if place:
+        info.append(f"area {place_label(place)}")
     if color:
-        for line, text in zip(swatch_lines(rgb), info):
+        for line, text in zip_longest(swatch_lines(rgb, height=max(3, len(info))), info, fillvalue=""):
             print(f"{line}  {text}")
     else:
         for text in info:
             print(text)
     if missing:
         print(f"note: {missing}/{plan.tile_count} tiles missing (filled black)", file=sys.stderr)
+    warn_if_all_black([rgb])
 
 
 def cmd_matrix(args) -> None:
     settings = build_settings()
-    box = parse_bbox_arg(args.bbox, settings)
+    box, place = parse_area_arg(args.bbox, args.radius_km, settings)
     layer = resolve_truecolor_layer(args.layer)
     date, resolved_from = resolve_date(args.date, layer.id, settings)
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, args.rows, args.cols, "RGB"))
     matrix = colors.to_grid(cropped, args.rows, args.cols)
     if args.json:
-        print(json.dumps({
+        payload = {
             "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
             "date": date, "date_resolved_from": resolved_from, "layer": layer.id,
             "rows": args.rows, "cols": args.cols, "origin": "northwest",
             "source": source_info(plan, missing, layer), "matrix": matrix,
-        }))
+        }
+        if place:
+            payload["zip"] = place
+        print(json.dumps(payload))
         return
     color = use_color(args.color)
     if not color or args.hex:
         for line in render_hex_matrix(matrix):
             print(line)
     if color:
-        wide = args.cols * 2 > terminal_width()
-        for line in (render_matrix_half(matrix) if wide else render_matrix(matrix)):
+        cell_w, cell_h, half = fit_cell_size(args.cols, terminal_width())
+        if half:
+            body, grid_width = render_matrix_half(matrix), args.cols
+        else:
+            body, grid_width = render_matrix(matrix, cell_w, cell_h), args.cols * cell_w
+        for line in frame_matrix(body, box, grid_width):
             print(line)
-    print(f"{args.rows}x{args.cols} cells, north at top | {date}"
+    loc = f"{place_label(place)} | " if place else ""
+    print(f"{loc}{args.rows}x{args.cols} cells, north at top | {date}"
           + (" (latest)" if resolved_from == "latest" else "")
           + f" | zoom {plan.zoom}, {plan.tile_count} tiles"
           + (f", {missing} missing" if missing else ""))
+    warn_if_all_black(cell for row in matrix for cell in row)
 
 
 def cmd_snow(args) -> None:
     settings = build_settings()
-    box = parse_bbox_arg(args.bbox, settings)
+    box, place = parse_area_arg(args.bbox, args.radius_km, settings)
     layer = layer_registry.SNOW_LAYER
     date, resolved_from = resolve_date(args.date, layer.id, settings)
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, args.rows, args.cols, "P"))
     stats = snow_mod.analyze(cropped)
     grid = snow_mod.analyze_grid(cropped, args.rows, args.cols) if args.rows * args.cols > 1 else None
     if args.json:
-        print(json.dumps({
+        payload = {
             "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
             "date": date, "date_resolved_from": resolved_from, "layer": layer.id,
             "snow_fraction": stats.snow_fraction, "valid_fraction": stats.valid_fraction,
             "cloud_fraction": stats.cloud_fraction, "water_fraction": stats.water_fraction,
             "matrix": grid, "source": source_info(plan, missing, layer),
-        }))
+        }
+        if place:
+            payload["zip"] = place
+        print(json.dumps(payload))
         return
     color = use_color(args.color)
+    if place:
+        print(place_label(place))
     frac = "n/a" if stats.snow_fraction is None else f"{stats.snow_fraction:.1%}"
     if color and stats.snow_fraction is not None:
         tile = _bg(snow_fraction_color(stats.snow_fraction)) + "    " + RESET + " "
@@ -291,12 +488,34 @@ def cmd_snow(args) -> None:
             print(f"legend: bare {legend}{RESET} snow, {DIM}··{RESET} = no data (cloud/night/water)")
 
 
+def cmd_zip(args) -> None:
+    if not ZIP_RE.match(args.zip):
+        raise SystemExit("error: ZIP must be 5 digits (e.g. 92037), optionally ZIP+4")
+    settings = build_settings()
+    box, info = resolve_zip(args.zip, args.radius_km, settings)
+    PROGRESS.clear()
+    if args.json:
+        print(json.dumps({
+            **info, "radius_km": args.radius_km,
+            "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
+        }))
+        return
+    bbox_str = f"{box.min_lon:.4f},{box.min_lat:.4f},{box.max_lon:.4f},{box.max_lat:.4f}"
+    print(f"{info['zip']}  {info['place']}, {info['state']}")
+    print(f"center  {info['lat']:.4f}, {info['lon']:.4f}")
+    print(f"bbox    {bbox_str}  ({args.radius_km:g} km radius)")
+    print(f"try:    ground-color matrix {info['zip']}   # ZIPs work anywhere a bbox does")
+
+
 def cmd_layers(args) -> None:
     settings = build_settings()
     rows = []
     for layer in layer_registry.all_layers():
+        if not args.offline:
+            PROGRESS.update(f"resolving latest available date for {layer.id}…")
         latest = latest_date_cached(settings, layer.id) if not args.offline else "?"
         rows.append((layer.id, layer.kind, f"{layer.tile_matrix_set}/{layer.ext}", latest))
+    PROGRESS.clear()
     if args.json:
         print(json.dumps({
             "default_layer": layer_registry.DEFAULT_TRUECOLOR.id,
@@ -332,8 +551,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(p, grid_defaults=None):
         p._negative_number_matcher = bbox_matcher
-        p.add_argument("bbox", help="minLon,minLat,maxLon,maxLat (WGS84 degrees)")
+        p.add_argument("bbox", help="minLon,minLat,maxLon,maxLat (WGS84 degrees), or a US ZIP code")
         p.add_argument("--date", help="YYYY-MM-DD or 'latest' (default: latest available)")
+        p.add_argument("--radius-km", type=float, default=5.0, metavar="KM",
+                       help="box half-size when the area is given as a ZIP code (default 5)")
         p.add_argument("--json", action="store_true", help="print JSON (same shape as the API)")
         p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                        help="terminal color output (default: auto-detect)")
@@ -342,12 +563,12 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--rows", type=int, default=rows, metavar="N", help=f"grid rows (default {rows})")
             p.add_argument("--cols", type=int, default=cols, metavar="N", help=f"grid cols (default {cols})")
 
-    p_color = sub.add_parser("color", help="composite color of a bbox, with a color swatch")
+    p_color = sub.add_parser("color", help="composite color of a bbox or ZIP, with a color swatch")
     common(p_color)
     p_color.add_argument("--layer", help="true-color layer id (see 'layers')")
     p_color.set_defaults(func=cmd_color)
 
-    p_matrix = sub.add_parser("matrix", help="grid of colors rendered as terminal cells")
+    p_matrix = sub.add_parser("matrix", help="grid of colors rendered as a framed terminal map")
     common(p_matrix, grid_defaults=(16, 16))
     p_matrix.add_argument("--layer", help="true-color layer id (see 'layers')")
     p_matrix.add_argument("--hex", action="store_true", help="also print the hex values grid")
@@ -356,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_snow = sub.add_parser("snow", help="snow cover stats, optionally as a colored grid")
     common(p_snow, grid_defaults=(1, 1))
     p_snow.set_defaults(func=cmd_snow)
+
+    p_zip = sub.add_parser("zip", help="resolve a US ZIP code to a bounding box")
+    p_zip.add_argument("zip", help="5-digit US ZIP code (ZIP+4 accepted)")
+    p_zip.add_argument("--radius-km", type=float, default=5.0, metavar="KM",
+                       help="box half-size around the ZIP centroid (default 5)")
+    p_zip.add_argument("--json", action="store_true")
+    p_zip.set_defaults(func=cmd_zip)
 
     p_layers = sub.add_parser("layers", help="list available imagery layers")
     p_layers.add_argument("--json", action="store_true")
@@ -371,7 +599,13 @@ def main(argv: list[str] | None = None) -> None:
         value = getattr(args, name, None)
         if value is not None and not (1 <= value <= 256):
             raise SystemExit(f"error: --{name} must be in [1, 256]")
-    args.func(args)
+    radius = getattr(args, "radius_km", None)
+    if radius is not None and not (0 < radius <= 300):
+        raise SystemExit("error: --radius-km must be in (0, 300]")
+    try:
+        args.func(args)
+    finally:
+        PROGRESS.clear()
 
 
 if __name__ == "__main__":
