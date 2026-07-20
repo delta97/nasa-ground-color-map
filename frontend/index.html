@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GROUND TRUTH — NASA GIBS Ground-Color Console</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        void:  '#05080d',
+        panel: '#0a111c',
+        line:  '#1d2c42',
+        amber: '#ffb000',
+        amber2:'#ffd479',
+        ice:   '#6fd3ff',
+        mint:  '#3ddc84',
+        alert: '#ff5d5d',
+        dim:   '#8fa3bd',
+      },
+      fontFamily: {
+        display: ['"Chakra Petch"', 'sans-serif'],
+        mono: ['"IBM Plex Mono"', 'monospace'],
+      },
+    },
+  },
+};
+</script>
+
+<style>
+  html { background: #05080d; }
+  body { font-family: 'Chakra Petch', sans-serif; }
+
+  /* ---- CRT atmosphere: scanlines + vignette ---- */
+  body::after {
+    content: ''; position: fixed; inset: 0; z-index: 70; pointer-events: none;
+    background:
+      repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 3px),
+      radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.42) 100%);
+  }
+
+  /* ---- Panels with corner brackets ---- */
+  .panel {
+    position: relative;
+    background: linear-gradient(180deg, #0b1320 0%, #0a111c 100%);
+    border: 1px solid #1d2c42;
+  }
+  .panel::before, .panel::after {
+    content: ''; position: absolute; width: 14px; height: 14px; pointer-events: none;
+  }
+  .panel::before { top: -1px; left: -1px; border-top: 2px solid #ffb000; border-left: 2px solid #ffb000; }
+  .panel::after  { bottom: -1px; right: -1px; border-bottom: 2px solid #ffb000; border-right: 2px solid #ffb000; }
+
+  .panel-title {
+    font-size: 11px; letter-spacing: .28em; color: #ffb000;
+    text-transform: uppercase; font-weight: 600;
+  }
+  .panel-title .fa-solid, .panel-title .fa-regular { color: #6fd3ff; margin-right: .5rem; }
+
+  /* ---- staggered boot animation ---- */
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .boot { opacity: 0; animation: rise .5s cubic-bezier(.2,.7,.3,1) forwards; }
+
+  /* ---- blinking status dot / cursor ---- */
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .15 } }
+  .blink { animation: blink 1.2s steps(1) infinite; }
+
+  /* ---- acquiring stripes ---- */
+  @keyframes stripes { from { background-position: 0 0 } to { background-position: 28px 0 } }
+  .acquiring {
+    background: repeating-linear-gradient(45deg, rgba(255,176,0,.25) 0 8px, rgba(255,176,0,.06) 8px 16px);
+    background-size: 28px 28px; animation: stripes .6s linear infinite;
+  }
+
+  /* ---- map ---- */
+  #map { background: #05080d; cursor: grab; }
+  #map.crosshair { cursor: crosshair !important; }
+  .map-dark .leaflet-tile {
+    filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.92) saturate(.5);
+  }
+  .leaflet-container { font-family: 'IBM Plex Mono', monospace; }
+  .leaflet-control-attribution {
+    background: rgba(5,8,13,.8) !important; color: #8fa3bd !important;
+    font-size: 10px !important;
+  }
+  .leaflet-control-attribution a { color: #6fd3ff !important; }
+  .leaflet-bar a {
+    background: #0a111c !important; color: #ffd479 !important; border-color: #1d2c42 !important;
+  }
+  .leaflet-bar a:hover { background: #12203a !important; }
+
+  /* ---- console buttons ---- */
+  .cbtn {
+    font-size: 11px; letter-spacing: .18em; text-transform: uppercase; font-weight: 600;
+    border: 1px solid #1d2c42; color: #ffd479; background: rgba(10,17,28,.92);
+    padding: .5rem .75rem; transition: all .15s;
+    display: inline-flex; align-items: center; gap: .5rem; user-select: none;
+  }
+  .cbtn:hover { border-color: #ffb000; color: #ffb000; box-shadow: 0 0 12px rgba(255,176,0,.25); }
+  .cbtn.active { background: #ffb000; color: #05080d; border-color: #ffb000; }
+  .cbtn:disabled { opacity: .35; pointer-events: none; }
+
+  .cbtn-primary {
+    background: #ffb000; color: #05080d; border-color: #ffb000;
+    font-weight: 700;
+  }
+  .cbtn-primary:hover { background: #ffd479; color: #05080d; box-shadow: 0 0 18px rgba(255,176,0,.5); }
+
+  /* ---- form fields ---- */
+  .cfield {
+    background: #060b13; border: 1px solid #1d2c42; color: #e8eefc;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    padding: .45rem .6rem; width: 100%;
+  }
+  .cfield:focus { outline: none; border-color: #ffb000; box-shadow: 0 0 0 1px rgba(255,176,0,.35); }
+  input[type="date"].cfield::-webkit-calendar-picker-indicator { filter: invert(.8) sepia(1) saturate(4) hue-rotate(-10deg); cursor: pointer; }
+
+  /* ---- key/value telemetry rows ---- */
+  .kv { display: flex; justify-content: space-between; gap: 1rem; font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: .3rem 0; border-bottom: 1px dashed rgba(29,44,66,.7); }
+  .kv:last-child { border-bottom: 0; }
+  .kv .k { color: #8fa3bd; letter-spacing: .08em; }
+  .kv .v { color: #e8eefc; text-align: right; }
+
+  /* ---- matrix canvas ---- */
+  #matrixCanvas { image-rendering: pixelated; width: 100%; height: auto; display: block; cursor: crosshair; border: 1px solid #1d2c42; }
+
+  /* ---- log ---- */
+  #log { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; line-height: 1.7; }
+  #log .t { color: #526548; color: #5b7089; margin-right: .5em; }
+  #log .ok { color: #3ddc84; } #log .err { color: #ff5d5d; } #log .info { color: #cfd9ea; } #log .warn { color: #ffd479; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #060b13; }
+  ::-webkit-scrollbar-thumb { background: #1d2c42; }
+  ::-webkit-scrollbar-thumb:hover { background: #2c4266; }
+  * { scrollbar-width: thin; scrollbar-color: #1d2c42 #060b13; }
+
+  .swatch-check { background-image: linear-gradient(45deg,#131c2b 25%,transparent 25%,transparent 75%,#131c2b 75%), linear-gradient(45deg,#131c2b 25%,transparent 25%,transparent 75%,#131c2b 75%); background-size: 12px 12px; background-position: 0 0, 6px 6px; }
+</style>
+</head>
+
+<body class="bg-void text-slate-200 min-h-screen flex flex-col">
+
+<!-- ============ HEADER ============ -->
+<header class="boot flex items-center gap-4 px-4 md:px-6 h-14 border-b border-line bg-panel/80 backdrop-blur z-20 shrink-0">
+  <i class="fa-solid fa-satellite-dish text-amber text-lg"></i>
+  <div class="leading-none">
+    <div class="font-display font-700 font-bold tracking-[.3em] text-sm md:text-base text-slate-100">GROUND<span class="text-amber">TRUTH</span></div>
+    <div class="text-[9px] tracking-[.24em] text-dim mt-1 hidden sm:block">NASA GIBS GROUND-COLOR CONSOLE</div>
+  </div>
+  <div class="flex-1"></div>
+  <div class="hidden md:flex items-center gap-2 font-mono text-[11px] text-dim">
+    <i class="fa-regular fa-clock text-ice"></i>
+    <span id="utcClock">--:--:--</span><span class="text-ice">UTC</span>
+  </div>
+  <div class="flex items-center gap-2 font-mono text-[11px]">
+    <span id="statusDot" class="inline-block w-2 h-2 rounded-full bg-dim blink"></span>
+    <span id="statusText" class="text-dim tracking-widest">LINKING…</span>
+  </div>
+</header>
+
+<!-- ============ MAIN ============ -->
+<main class="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_400px] xl:grid-cols-[1fr_440px] min-h-0">
+
+  <!-- ---- MAP ---- -->
+  <section class="boot relative min-h-[55vh] lg:min-h-0" style="animation-delay:.08s">
+    <div id="map" class="map-dark absolute inset-0 z-0"></div>
+
+    <!-- map control cluster -->
+    <div class="absolute top-3 right-3 z-[500] flex flex-col items-end gap-2">
+      <button id="drawBtn" class="cbtn" title="Drag a rectangle on the map">
+        <i class="fa-solid fa-vector-square"></i><span>Draw&nbsp;BBox</span>
+      </button>
+      <button id="viewBtn" class="cbtn" title="Use the current viewport as the bounding box">
+        <i class="fa-solid fa-expand"></i><span>Use&nbsp;View</span>
+      </button>
+      <button id="clearBtn" class="cbtn" title="Clear target">
+        <i class="fa-solid fa-xmark"></i><span>Clear</span>
+      </button>
+      <button id="themeBtn" class="cbtn" title="Toggle map theme">
+        <i class="fa-solid fa-circle-half-stroke"></i><span>Map:&nbsp;Dark</span>
+      </button>
+    </div>
+
+    <!-- cursor readout -->
+    <div class="absolute bottom-6 left-3 z-[500] font-mono text-[10px] text-amber2 bg-void/80 border border-line px-2 py-1 tracking-wider hidden md:block">
+      <i class="fa-solid fa-crosshairs text-ice mr-1"></i><span id="cursorPos">—</span>
+    </div>
+
+    <!-- draw hint -->
+    <div id="drawHint" class="absolute top-3 left-1/2 -translate-x-1/2 z-[500] hidden font-mono text-[11px] tracking-[.2em] text-void bg-amber px-3 py-1.5 shadow-lg shadow-amber/30">
+      <i class="fa-solid fa-hand-pointer mr-1"></i>DRAG TO DEFINE TARGET AREA
+    </div>
+  </section>
+
+  <!-- ---- CONSOLE ---- -->
+  <aside class="bg-void border-l border-line overflow-y-auto p-3 md:p-4 space-y-4 lg:max-h-[calc(100vh-3.5rem)]">
+
+    <!-- TARGET / TASKING -->
+    <div class="panel boot p-4" style="animation-delay:.16s">
+      <div class="panel-title mb-3"><i class="fa-solid fa-location-crosshairs"></i>Target Tasking</div>
+
+      <div class="grid grid-cols-2 gap-2 font-mono text-[11px] mb-3">
+        <div class="border border-line bg-void/60 p-2"><div class="text-dim text-[9px] tracking-[.2em] mb-1">WEST&nbsp;LON</div><div id="bbW" class="text-amber2">—</div></div>
+        <div class="border border-line bg-void/60 p-2"><div class="text-dim text-[9px] tracking-[.2em] mb-1">EAST&nbsp;LON</div><div id="bbE" class="text-amber2">—</div></div>
+        <div class="border border-line bg-void/60 p-2"><div class="text-dim text-[9px] tracking-[.2em] mb-1">SOUTH&nbsp;LAT</div><div id="bbS" class="text-amber2">—</div></div>
+        <div class="border border-line bg-void/60 p-2"><div class="text-dim text-[9px] tracking-[.2em] mb-1">NORTH&nbsp;LAT</div><div id="bbN" class="text-amber2">—</div></div>
+      </div>
+      <div class="kv mb-3"><span class="k">SPAN</span><span class="v" id="bbSpan">no target — draw a bbox or use the current view</span></div>
+
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <label class="block">
+          <span class="text-[9px] tracking-[.2em] text-dim block mb-1">DATE (UTC) — BLANK = LATEST</span>
+          <input id="dateInput" type="date" class="cfield" />
+        </label>
+        <label class="block">
+          <span class="text-[9px] tracking-[.2em] text-dim block mb-1">GRID RESOLUTION</span>
+          <select id="gridSel" class="cfield">
+            <option value="8">8 × 8</option>
+            <option value="16" selected>16 × 16</option>
+            <option value="24">24 × 24</option>
+            <option value="32">32 × 32</option>
+            <option value="48">48 × 48</option>
+            <option value="64">64 × 64</option>
+          </select>
+        </label>
+      </div>
+      <label class="block mb-4">
+        <span class="text-[9px] tracking-[.2em] text-dim block mb-1">IMAGERY LAYER</span>
+        <select id="layerSel" class="cfield">
+          <option value="">loading layers…</option>
+        </select>
+      </label>
+
+      <button id="acquireBtn" class="cbtn cbtn-primary w-full justify-center py-3 text-[13px]" disabled>
+        <i class="fa-solid fa-satellite"></i><span id="acquireLabel">Acquire Ground Data</span>
+      </button>
+      <div id="acquireBar" class="acquiring h-1.5 mt-2 hidden"></div>
+    </div>
+
+    <!-- COMPOSITE COLOR -->
+    <div class="panel boot p-4" style="animation-delay:.24s">
+      <div class="panel-title mb-3"><i class="fa-solid fa-droplet"></i>Composite Ground Color</div>
+      <div class="flex items-stretch gap-4">
+        <div class="swatch-check w-24 h-24 shrink-0 border border-line relative">
+          <div id="swatch" class="absolute inset-0 transition-colors duration-500"></div>
+        </div>
+        <div class="flex-1 font-mono text-[11px] space-y-1.5 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-2xl text-slate-100 tracking-wide font-500" id="hexVal">#——</span>
+            <button id="copyHex" class="cbtn !px-2 !py-1 hidden" title="Copy hex"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <div class="kv"><span class="k">RGB</span><span class="v" id="rgbVal">—</span></div>
+          <div class="kv"><span class="k">DATE</span><span class="v" id="compDate">—</span></div>
+          <div class="kv"><span class="k">READS&nbsp;AS</span><span class="v" id="colorRead">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COLOR MATRIX -->
+    <div class="panel boot p-4" style="animation-delay:.32s">
+      <div class="panel-title mb-3 flex items-center justify-between">
+        <span><i class="fa-solid fa-table-cells"></i>Color Matrix</span>
+        <span class="flex gap-1.5">
+          <button id="overlayBtn" class="cbtn !px-2 !py-1 hidden" title="Project matrix onto the map"><i class="fa-solid fa-layer-group"></i></button>
+          <button id="dlBtn" class="cbtn !px-2 !py-1 hidden" title="Download matrix as PNG"><i class="fa-solid fa-download"></i></button>
+        </span>
+      </div>
+      <div id="matrixEmpty" class="font-mono text-[11px] text-dim border border-dashed border-line p-6 text-center tracking-[.2em]">AWAITING TASKING<span class="blink text-amber">▮</span></div>
+      <canvas id="matrixCanvas" class="hidden"></canvas>
+      <div id="cellReadout" class="font-mono text-[10.5px] text-dim mt-2 hidden">
+        <i class="fa-solid fa-eye-dropper text-ice mr-1"></i><span id="cellInfo">hover a cell — click to copy hex</span>
+      </div>
+    </div>
+
+    <!-- SNOW -->
+    <div class="panel boot p-4" style="animation-delay:.40s">
+      <div class="panel-title mb-3"><i class="fa-regular fa-snowflake"></i>Snow Cover · MODIS NDSI</div>
+      <div class="flex items-center gap-5">
+        <div class="relative w-28 h-28 shrink-0">
+          <svg viewBox="0 0 120 120" class="w-full h-full -rotate-90">
+            <circle cx="60" cy="60" r="52" fill="none" stroke="#122036" stroke-width="10"/>
+            <circle id="snowRing" cx="60" cy="60" r="52" fill="none" stroke="#6fd3ff" stroke-width="10"
+                    stroke-linecap="butt" stroke-dasharray="326.7" stroke-dashoffset="326.7"
+                    style="transition: stroke-dashoffset .8s cubic-bezier(.2,.7,.3,1)"/>
+          </svg>
+          <div class="absolute inset-0 flex flex-col items-center justify-center font-mono">
+            <span id="snowPct" class="text-xl text-ice font-600">—</span>
+            <span class="text-[8px] tracking-[.25em] text-dim">SNOW</span>
+          </div>
+        </div>
+        <div class="flex-1 space-y-2.5 font-mono text-[10.5px] min-w-0">
+          <div>
+            <div class="flex justify-between mb-1"><span class="text-dim tracking-wider">OBSERVABLE LAND</span><span id="validPct" class="text-slate-100">—</span></div>
+            <div class="h-1.5 bg-[#122036]"><div id="validBar" class="h-full bg-mint transition-all duration-700" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between mb-1"><span class="text-dim tracking-wider">CLOUD</span><span id="cloudPct" class="text-slate-100">—</span></div>
+            <div class="h-1.5 bg-[#122036]"><div id="cloudBar" class="h-full bg-slate-400 transition-all duration-700" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between mb-1"><span class="text-dim tracking-wider">WATER</span><span id="waterPct" class="text-slate-100">—</span></div>
+            <div class="h-1.5 bg-[#122036]"><div id="waterBar" class="h-full bg-ice/60 transition-all duration-700" style="width:0%"></div></div>
+          </div>
+        </div>
+      </div>
+      <div id="snowNote" class="font-mono text-[10px] text-dim mt-3 leading-relaxed hidden"></div>
+    </div>
+
+    <!-- TELEMETRY -->
+    <div class="panel boot p-4" style="animation-delay:.48s">
+      <div class="panel-title mb-2"><i class="fa-solid fa-tower-broadcast"></i>Source Telemetry</div>
+      <div id="telemetry">
+        <div class="kv"><span class="k">LAYER</span><span class="v" id="tLayer">—</span></div>
+        <div class="kv"><span class="k">DATE&nbsp;RESOLVED</span><span class="v" id="tDate">—</span></div>
+        <div class="kv"><span class="k">WMTS&nbsp;ZOOM</span><span class="v" id="tZoom">—</span></div>
+        <div class="kv"><span class="k">TILES&nbsp;FETCHED&nbsp;/&nbsp;MISSING</span><span class="v" id="tTiles">—</span></div>
+        <div class="kv"><span class="k">NATIVE&nbsp;PIXEL</span><span class="v" id="tPixel">—</span></div>
+        <div class="kv"><span class="k">CELL&nbsp;SIZE</span><span class="v" id="tCell">—</span></div>
+      </div>
+    </div>
+
+    <!-- EVENT LOG -->
+    <div class="panel boot p-4" style="animation-delay:.56s">
+      <div class="panel-title mb-2"><i class="fa-solid fa-terminal"></i>Event Log</div>
+      <div id="log" class="h-36 overflow-y-auto pr-1"></div>
+    </div>
+
+    <div class="boot font-mono text-[9px] text-dim/70 leading-relaxed pb-2 px-1" style="animation-delay:.64s">
+      Imagery courtesy NASA Global Imagery Browse Services (GIBS), NASA/GSFC/ESDIS.
+      Single-day true-color imagery frequently contains cloud — bright grey/white results
+      usually mean cloud, not ground. Try adjacent dates.
+    </div>
+  </aside>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+'use strict';
+
+/* ================= config ================= */
+const API = location.protocol.startsWith('http') ? '' : 'http://localhost:8000';
+const MAX_SPAN_DEG = 60;
+
+/* ================= tiny helpers ================= */
+const $ = id => document.getElementById(id);
+const fmt = (n, d = 4) => Number(n).toFixed(d).replace(/\.?0+$/, m => m.includes('.') ? '' : m);
+const pct = f => (f * 100).toFixed(1) + '%';
+
+function log(msg, cls = 'info') {
+  const t = new Date().toISOString().slice(11, 19);
+  const el = document.createElement('div');
+  el.innerHTML = `<span class="t">[${t}Z]</span><span class="${cls}">${msg}</span>`;
+  $('log').appendChild(el);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `${res.status} ${res.statusText}`);
+  return body;
+}
+
+/* ================= clock + health ================= */
+setInterval(() => { $('utcClock').textContent = new Date().toISOString().slice(11, 19); }, 1000);
+
+(async () => {
+  try {
+    const h = await fetchJson(`${API}/healthz`);
+    $('statusDot').className = 'inline-block w-2 h-2 rounded-full bg-mint';
+    $('statusText').textContent = 'LINK ESTABLISHED';
+    $('statusText').className = 'text-mint tracking-widest';
+    log(`API online — v${h.version}`, 'ok');
+  } catch (e) {
+    $('statusDot').className = 'inline-block w-2 h-2 rounded-full bg-alert blink';
+    $('statusText').textContent = 'API OFFLINE';
+    $('statusText').className = 'text-alert tracking-widest';
+    log(`API unreachable at ${API || location.origin} — start the server (uvicorn nasa_ground_color_map.main:app)`, 'err');
+  }
+})();
+
+/* ================= layers ================= */
+(async () => {
+  try {
+    const data = await fetchJson(`${API}/v1/layers`);
+    const sel = $('layerSel');
+    sel.innerHTML = '';
+    data.layers.filter(l => l.kind === 'truecolor').forEach(l => {
+      const opt = document.createElement('option');
+      opt.value = l.id;
+      const short = l.id.replace(/_CorrectedReflectance_TrueColor/, '').replace(/_/g, ' ');
+      opt.textContent = `${short}${l.latest_available_date ? ' · latest ' + l.latest_available_date : ''}`;
+      if (l.id === data.default_layer) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    const snow = data.layers.find(l => l.kind === 'snow');
+    if (snow && snow.latest_available_date) log(`Snow layer latest: ${snow.latest_available_date}`, 'info');
+  } catch (e) {
+    $('layerSel').innerHTML = '<option value="">default (VIIRS SNPP)</option>';
+  }
+})();
+$('dateInput').max = new Date().toISOString().slice(0, 10);
+
+/* ================= map ================= */
+const map = L.map('map', { zoomControl: true, worldCopyJump: false })
+  .setView([39.5, -105.5], 6);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+}).addTo(map);
+
+map.on('mousemove', e => {
+  $('cursorPos').textContent = `${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}`;
+});
+
+$('themeBtn').addEventListener('click', () => {
+  const el = $('map');
+  el.classList.toggle('map-dark');
+  $('themeBtn').querySelector('span').textContent = el.classList.contains('map-dark') ? 'Map: Dark' : 'Map: Light';
+});
+
+/* ================= bbox drawing ================= */
+const RECT_STYLE = { color: '#ffb000', weight: 1.5, dashArray: '6 4', fillColor: '#ffb000', fillOpacity: 0.08 };
+let drawMode = false, drawStart = null, drawRect = null, bboxRect = null, bbox = null;
+
+function setDrawMode(on) {
+  drawMode = on;
+  map.dragging[on ? 'disable' : 'enable']();
+  $('map').classList.toggle('crosshair', on);
+  $('drawBtn').classList.toggle('active', on);
+  $('drawHint').classList.toggle('hidden', !on);
+}
+$('drawBtn').addEventListener('click', () => setDrawMode(!drawMode));
+
+map.on('mousedown', e => {
+  if (!drawMode) return;
+  drawStart = e.latlng;
+  drawRect = L.rectangle(L.latLngBounds(drawStart, drawStart), RECT_STYLE).addTo(map);
+});
+map.on('mousemove', e => {
+  if (drawStart && drawRect) drawRect.setBounds(L.latLngBounds(drawStart, e.latlng));
+});
+map.on('mouseup', e => {
+  if (!drawStart) return;
+  const bounds = L.latLngBounds(drawStart, e.latlng);
+  drawStart = null;
+  setDrawMode(false);
+  const tiny = Math.abs(bounds.getEast() - bounds.getWest()) < 0.005 ||
+               Math.abs(bounds.getNorth() - bounds.getSouth()) < 0.005;
+  if (tiny) { map.removeLayer(drawRect); drawRect = null; log('BBox too small — drag a larger area', 'warn'); return; }
+  if (bboxRect) map.removeLayer(bboxRect);
+  bboxRect = drawRect; drawRect = null;
+  setBBox(bounds);
+});
+
+$('viewBtn').addEventListener('click', () => {
+  const b = map.getBounds();
+  if (bboxRect) map.removeLayer(bboxRect);
+  bboxRect = L.rectangle(b, RECT_STYLE).addTo(map);
+  setBBox(b);
+});
+
+$('clearBtn').addEventListener('click', () => {
+  if (bboxRect) { map.removeLayer(bboxRect); bboxRect = null; }
+  clearOverlay();
+  bbox = null;
+  ['bbW','bbS','bbE','bbN'].forEach(id => $(id).textContent = '—');
+  $('bbSpan').textContent = 'no target — draw a bbox or use the current view';
+  $('acquireBtn').disabled = true;
+  log('Target cleared', 'info');
+});
+
+function setBBox(bounds) {
+  const w = Math.max(-180, bounds.getWest()), e = Math.min(180, bounds.getEast());
+  const s = Math.max(-85, bounds.getSouth()), n = Math.min(85, bounds.getNorth());
+  bbox = { w: +w.toFixed(4), s: +s.toFixed(4), e: +e.toFixed(4), n: +n.toFixed(4) };
+  $('bbW').textContent = bbox.w; $('bbE').textContent = bbox.e;
+  $('bbS').textContent = bbox.s; $('bbN').textContent = bbox.n;
+  const spanLon = bbox.e - bbox.w, spanLat = bbox.n - bbox.s;
+  $('bbSpan').textContent = `${spanLon.toFixed(2)}° lon × ${spanLat.toFixed(2)}° lat`;
+  const tooBig = spanLon > MAX_SPAN_DEG || spanLat > MAX_SPAN_DEG;
+  $('acquireBtn').disabled = tooBig;
+  if (tooBig) log(`BBox exceeds ${MAX_SPAN_DEG}° per-axis limit — draw a smaller area`, 'warn');
+  else log(`Target locked: ${bbox.w},${bbox.s},${bbox.e},${bbox.n}`, 'ok');
+}
+
+/* ================= acquisition ================= */
+let lastMatrix = null, overlayLayer = null;
+
+$('acquireBtn').addEventListener('click', acquire);
+
+async function acquire() {
+  if (!bbox) return;
+  const bboxStr = `${bbox.w},${bbox.s},${bbox.e},${bbox.n}`;
+  const grid = $('gridSel').value;
+  const date = $('dateInput').value;
+  const layer = $('layerSel').value;
+
+  const base = new URLSearchParams({ bbox: bboxStr });
+  if (date) base.set('date', date);
+
+  const pMatrix = new URLSearchParams(base); pMatrix.set('rows', grid); pMatrix.set('cols', grid);
+  const pColor = new URLSearchParams(base);
+  if (layer) { pMatrix.set('layer', layer); pColor.set('layer', layer); }
+  const pSnow = new URLSearchParams(base); pSnow.set('rows', grid); pSnow.set('cols', grid);
+
+  $('acquireBtn').disabled = true;
+  $('acquireLabel').textContent = 'Acquiring Tiles…';
+  $('acquireBar').classList.remove('hidden');
+  log(`Tasking GIBS — bbox=${bboxStr} grid=${grid}×${grid}${date ? ' date=' + date : ' date=latest'}`, 'info');
+
+  const [rMatrix, rColor, rSnow] = await Promise.allSettled([
+    fetchJson(`${API}/v1/color-matrix?${pMatrix}`),
+    fetchJson(`${API}/v1/color?${pColor}`),
+    fetchJson(`${API}/v1/snow?${pSnow}`),
+  ]);
+
+  if (rColor.status === 'fulfilled') renderComposite(rColor.value);
+  else log(`color: ${rColor.reason.message}`, 'err');
+
+  if (rMatrix.status === 'fulfilled') { renderMatrix(rMatrix.value); renderTelemetry(rMatrix.value); }
+  else log(`color-matrix: ${rMatrix.reason.message}`, 'err');
+
+  if (rSnow.status === 'fulfilled') renderSnow(rSnow.value);
+  else log(`snow: ${rSnow.reason.message}`, 'err');
+
+  const ok = [rMatrix, rColor, rSnow].filter(r => r.status === 'fulfilled').length;
+  log(`Acquisition complete — ${ok}/3 channels`, ok === 3 ? 'ok' : 'warn');
+
+  $('acquireBtn').disabled = false;
+  $('acquireLabel').textContent = 'Acquire Ground Data';
+  $('acquireBar').classList.add('hidden');
+}
+
+/* ================= composite ================= */
+function describeColor([r, g, b]) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), lum = (r + g + b) / 3;
+  if (max - min < 18) {
+    if (lum > 200) return 'bright white — snow or cloud';
+    if (lum > 130) return 'grey — likely cloud or rock';
+    return 'dark grey — shadow, water or night';
+  }
+  if (g >= r && g >= b) return lum > 110 ? 'green — vegetation' : 'dark green — dense vegetation';
+  if (r >= g && g >= b) return lum > 140 ? 'tan — arid ground or sand' : 'brown — bare soil or scrub';
+  if (b >= r && b >= g) return 'blue — open water';
+  return 'mixed terrain';
+}
+
+function renderComposite(d) {
+  $('swatch').style.background = d.hex;
+  $('hexVal').textContent = d.hex;
+  $('rgbVal').textContent = d.rgb.join(', ');
+  $('compDate').textContent = `${d.date}${d.date_resolved_from === 'latest' ? ' (latest)' : ''}`;
+  $('colorRead').textContent = describeColor(d.rgb);
+  $('copyHex').classList.remove('hidden');
+  $('copyHex').onclick = () => {
+    navigator.clipboard.writeText(d.hex);
+    log(`Copied ${d.hex}`, 'ok');
+  };
+}
+
+/* ================= matrix ================= */
+function renderMatrix(d) {
+  lastMatrix = d;
+  const canvas = $('matrixCanvas');
+  canvas.width = d.cols; canvas.height = d.rows;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(d.cols, d.rows);
+  for (let r = 0; r < d.rows; r++) {
+    for (let c = 0; c < d.cols; c++) {
+      const [R, G, B] = d.matrix[r][c];
+      const i = (r * d.cols + c) * 4;
+      img.data[i] = R; img.data[i + 1] = G; img.data[i + 2] = B; img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  $('matrixEmpty').classList.add('hidden');
+  canvas.classList.remove('hidden');
+  $('cellReadout').classList.remove('hidden');
+  $('overlayBtn').classList.remove('hidden');
+  $('dlBtn').classList.remove('hidden');
+  if (overlayLayer) projectOverlay(); // refresh existing overlay with new data
+}
+
+function cellAt(ev) {
+  if (!lastMatrix) return null;
+  const canvas = $('matrixCanvas');
+  const rect = canvas.getBoundingClientRect();
+  const c = Math.min(lastMatrix.cols - 1, Math.max(0, Math.floor((ev.clientX - rect.left) / rect.width * lastMatrix.cols)));
+  const r = Math.min(lastMatrix.rows - 1, Math.max(0, Math.floor((ev.clientY - rect.top) / rect.height * lastMatrix.rows)));
+  return { r, c };
+}
+
+$('matrixCanvas').addEventListener('mousemove', ev => {
+  const cell = cellAt(ev); if (!cell) return;
+  const d = lastMatrix;
+  const [w, s, e, n] = d.bbox;
+  const [R, G, B] = d.matrix[cell.r][cell.c];
+  const hex = '#' + [R, G, B].map(v => v.toString(16).padStart(2, '0')).join('');
+  const lat = n - (cell.r + 0.5) * (n - s) / d.rows;
+  const lon = w + (cell.c + 0.5) * (e - w) / d.cols;
+  $('cellInfo').innerHTML =
+    `<span style="color:${hex}">■</span> ${hex} · rgb(${R},${G},${B}) · [${cell.r},${cell.c}] · ${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+});
+$('matrixCanvas').addEventListener('mouseleave', () => {
+  $('cellInfo').textContent = 'hover a cell — click to copy hex';
+});
+$('matrixCanvas').addEventListener('click', ev => {
+  const cell = cellAt(ev); if (!cell) return;
+  const [R, G, B] = lastMatrix.matrix[cell.r][cell.c];
+  const hex = '#' + [R, G, B].map(v => v.toString(16).padStart(2, '0')).join('');
+  navigator.clipboard.writeText(hex);
+  log(`Copied cell [${cell.r},${cell.c}] ${hex}`, 'ok');
+});
+
+/* ---- map overlay projection ---- */
+function projectOverlay() {
+  clearOverlay(false);
+  const [w, s, e, n] = lastMatrix.bbox;
+  overlayLayer = L.imageOverlay($('matrixCanvas').toDataURL('image/png'),
+    [[s, w], [n, e]], { opacity: 0.85, interactive: false }).addTo(map);
+  $('overlayBtn').classList.add('active');
+}
+function clearOverlay(resetBtn = true) {
+  if (overlayLayer) { map.removeLayer(overlayLayer); overlayLayer = null; }
+  if (resetBtn) $('overlayBtn').classList.remove('active');
+}
+$('overlayBtn').addEventListener('click', () => {
+  if (overlayLayer) { clearOverlay(); log('Matrix overlay removed', 'info'); }
+  else if (lastMatrix) { projectOverlay(); log('Matrix projected onto map', 'ok'); }
+});
+
+/* ---- PNG download (upscaled, no smoothing) ---- */
+$('dlBtn').addEventListener('click', () => {
+  if (!lastMatrix) return;
+  const scale = Math.max(1, Math.round(640 / lastMatrix.cols));
+  const out = document.createElement('canvas');
+  out.width = lastMatrix.cols * scale; out.height = lastMatrix.rows * scale;
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage($('matrixCanvas'), 0, 0, out.width, out.height);
+  const a = document.createElement('a');
+  a.download = `ground-color_${lastMatrix.bbox.join('_')}_${lastMatrix.date}.png`;
+  a.href = out.toDataURL('image/png');
+  a.click();
+  log('Matrix PNG downloaded', 'ok');
+});
+
+/* ================= snow ================= */
+function renderSnow(d) {
+  const C = 326.7;
+  if (d.snow_fraction === null || d.snow_fraction === undefined) {
+    $('snowRing').style.strokeDashoffset = C;
+    $('snowPct').textContent = 'N/A';
+  } else {
+    $('snowRing').style.strokeDashoffset = C * (1 - d.snow_fraction);
+    $('snowPct').textContent = (d.snow_fraction * 100).toFixed(1) + '%';
+  }
+  $('validPct').textContent = pct(d.valid_fraction);
+  $('cloudPct').textContent = pct(d.cloud_fraction);
+  $('waterPct').textContent = pct(d.water_fraction);
+  $('validBar').style.width = pct(d.valid_fraction);
+  $('cloudBar').style.width = pct(d.cloud_fraction);
+  $('waterBar').style.width = pct(d.water_fraction);
+
+  const note = $('snowNote');
+  note.classList.remove('hidden');
+  if (d.snow_fraction === null) {
+    note.innerHTML = `<i class="fa-solid fa-circle-exclamation text-alert mr-1"></i>No observable land pixels on ${d.date} — night pass, heavy cloud, or open water.`;
+  } else if (d.valid_fraction < 0.3) {
+    note.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-amber mr-1"></i>Only ${pct(d.valid_fraction)} of the box was observable on ${d.date} — treat the snow reading as low-confidence.`;
+  } else {
+    note.innerHTML = `<i class="fa-solid fa-circle-check text-mint mr-1"></i>${pct(d.valid_fraction)} observable on ${d.date} — reading is representative.`;
+  }
+}
+
+/* ================= telemetry ================= */
+function renderTelemetry(d) {
+  $('tLayer').textContent = d.layer.replace(/_CorrectedReflectance_TrueColor/, '');
+  $('tDate').textContent = `${d.date} (${d.date_resolved_from})`;
+  $('tZoom').textContent = `${d.source.zoom}${d.source.zoom_degraded ? ' · DEGRADED' : ''}`;
+  $('tTiles').textContent = `${d.source.tiles_fetched} / ${d.source.tiles_missing}`;
+  $('tPixel').textContent = `${d.source.native_pixel_deg.toExponential(2)}°`;
+  $('tCell').textContent = `${fmt(d.cell_size_deg[0])}° × ${fmt(d.cell_size_deg[1])}°`;
+  if (d.source.zoom_degraded) log('Zoom degraded to respect tile budget — colors are coarser than requested', 'warn');
+  if (d.source.tiles_missing > 0) log(`${d.source.tiles_missing} tile(s) missing — rendered as black fill`, 'warn');
+}
+
+log('Console initialized — draw a bounding box to begin', 'info');
+</script>
+</body>
+</html>

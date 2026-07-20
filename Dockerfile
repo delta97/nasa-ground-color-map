@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY frontend ./frontend
 RUN pip install --no-cache-dir .
 
 RUN useradd --create-home appuser \

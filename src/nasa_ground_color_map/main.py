@@ -1,9 +1,12 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import routes_color, routes_snow
@@ -61,6 +64,12 @@ app = FastAPI(
     description=DESCRIPTION,
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # read-only public-data API
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 app.include_router(routes_color.router)
 app.include_router(routes_snow.router)
 
@@ -68,3 +77,23 @@ app.include_router(routes_snow.router)
 @app.get("/healthz", tags=["ops"], summary="Liveness check (does not touch GIBS)")
 async def healthz():
     return {"status": "ok", "version": __version__}
+
+
+def _find_frontend_dir() -> Path | None:
+    import os
+
+    candidates = [
+        os.environ.get("FRONTEND_DIR"),
+        Path(__file__).resolve().parents[2] / "frontend",  # repo checkout (editable install)
+        Path.cwd() / "frontend",  # docker: WORKDIR /app + COPY frontend
+    ]
+    for cand in candidates:
+        if cand and Path(cand).is_dir():
+            return Path(cand)
+    return None
+
+
+_frontend = _find_frontend_dir()
+if _frontend is not None:
+    # Mounted last so API routes and /docs keep precedence.
+    app.mount("/", StaticFiles(directory=_frontend, html=True), name="frontend")
