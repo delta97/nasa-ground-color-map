@@ -22,6 +22,24 @@ class Settings(BaseSettings):
     max_grid_cells: int = 65536  # rows * cols cap
 
     capabilities_refresh_seconds: int = 21600  # 6h
+    default_imagery_lag_days: int = 1
+
+    max_history_days: int = 31
+    default_composite_days: int = 7
+    max_composite_days: int = 14
+    min_composite_observations: int = 2
+    derived_cache_ttl_seconds: int = 21600
+
+    database_path: str = "/data/ground-truth.db"
+    monitoring_enabled: bool = False
+    monitoring_admin_token: str | None = None
+    monitor_retention_days: int = 365
+    allow_private_webhooks: bool = False
+    webhook_signing_secret: str | None = None
+
+    openrouter_api_key: str | None = None
+    openrouter_model: str | None = None
+    interpretation_access_token: str | None = None
 
 
 @lru_cache

@@ -89,8 +89,17 @@ def test_color_latest_date_resolution(api, red_tile):
     resp = client.get("/v1/color", params={"bbox": "-117.3,32.6,-117.0,32.9"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["date"] == "2026-07-18"  # from mocked capabilities
-    assert body["date_resolved_from"] == "latest"
+    assert body["date"] == "2026-07-18"  # capability lag wins
+    assert body["date_resolved_from"] == "latest_available_fallback"
+
+
+def test_color_explicit_latest_date_resolution(api, red_tile):
+    client, router = api
+    mock_truecolor_tiles(router, red_tile)
+    resp = client.get("/v1/color", params={"bbox": "-117.3,32.6,-117.0,32.9", "date": "latest"})
+    assert resp.status_code == 200
+    assert resp.json()["date"] == "2026-07-18"
+    assert resp.json()["date_resolved_from"] == "latest"
 
 
 def test_color_matrix_shape_and_metadata(api, red_tile):
@@ -140,11 +149,14 @@ def test_snow_grid(api):
     assert body["matrix"] == [[None, None], [None, None]]
 
 
-def test_all_tiles_failing_gives_502(api):
+def test_all_tiles_missing_is_an_unusable_observation(api):
     client, router = api
     router.get(url__regex=rf"{BASE}/\w+_CorrectedReflectance_TrueColor/default/.*\.jpg").respond(404)
     resp = client.get("/v1/color", params={"bbox": "-117.3,32.6,-117.0,32.9", "date": "2026-07-01"})
-    assert resp.status_code == 502
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["observation_quality"]["status"] == "unusable"
+    assert body["observation_quality"]["missing_tile_fraction"] == 1.0
 
 
 @pytest.mark.parametrize(

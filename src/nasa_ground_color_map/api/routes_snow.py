@@ -1,9 +1,11 @@
+from dataclasses import asdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..gibs.client import GibsClient
 from ..gibs.layers import SNOW_LAYER
 from ..gibs.tilemath import pixel_deg, plan_tiles
-from ..processing import mosaic, snow
+from ..processing import mosaic, quality, snow
 from . import deps
 from .schemas import SnowResponse, SourceInfo
 
@@ -22,7 +24,7 @@ router = APIRouter(prefix="/v1", tags=["snow"])
 )
 async def snow_stats(
     bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
-    date: str | None = Query(None, description="YYYY-MM-DD; omit for latest available"),
+    date: str | None = Query(None, description="YYYY-MM-DD, 'latest', or omit for the previous completed UTC day"),
     rows: int = Query(1, ge=1, le=256),
     cols: int = Query(1, ge=1, le=256),
     client: GibsClient = Depends(deps.get_client),
@@ -32,18 +34,12 @@ async def snow_stats(
     box = deps.parse_bbox(bbox, settings)
     deps.validate_grid(rows, cols, settings)
     layer = SNOW_LAYER
-    concrete_date, resolved_from = deps.resolve_date(date, layer.id, latest_dates)
+    concrete_date, resolved_from = deps.resolve_date(date, layer.id, latest_dates, settings)
     try:
         plan = plan_tiles(box, rows, cols, layer.max_zoom, settings.max_tiles_per_request, layer.tile_px)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     tiles = await client.fetch_plan(layer, concrete_date, plan)
-    if all(v is None for v in tiles.values()):
-        raise HTTPException(
-            502,
-            f"GIBS returned no snow imagery for {concrete_date}. The date may be outside "
-            "the layer's coverage, or GIBS may be unavailable.",
-        )
     cropped, missing = mosaic.stitch_and_crop(tiles, plan, mode="P")
     stats = snow.analyze(cropped)
     matrix = snow.analyze_grid(cropped, rows, cols) if rows * cols > 1 else None
@@ -64,4 +60,11 @@ async def snow_stats(
             tiles_missing=missing,
             native_pixel_deg=pixel_deg(plan.zoom, layer.tile_px),
         ),
+        observation_quality=asdict(quality.snow_quality(
+            observable_fraction=stats.valid_fraction,
+            cloud_fraction=stats.cloud_fraction,
+            water_fraction=stats.water_fraction,
+            tiles_missing=missing,
+            tiles_fetched=plan.tile_count,
+        )),
     )

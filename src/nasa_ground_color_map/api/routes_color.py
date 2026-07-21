@@ -1,9 +1,11 @@
+from dataclasses import asdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..gibs import layers as layer_registry
 from ..gibs.client import GibsClient
 from ..gibs.tilemath import BBox, pixel_deg, plan_tiles
-from ..processing import colors, mosaic
+from ..processing import colors, mosaic, quality
 from . import deps
 from .schemas import (
     ColorMatrixResponse,
@@ -38,12 +40,6 @@ async def _fetch_cropped(client: GibsClient, layer, date: str, bbox: BBox, rows:
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     tiles = await client.fetch_plan(layer, date, plan)
-    if all(v is None for v in tiles.values()):
-        raise HTTPException(
-            502,
-            f"GIBS returned no imagery for layer {layer.id} on {date}. "
-            "The date may be outside the layer's coverage, or GIBS may be unavailable. " + CLOUD_NOTE,
-        )
     cropped, missing = mosaic.stitch_and_crop(tiles, plan, mode="RGB")
     source = SourceInfo(
         zoom=plan.zoom,
@@ -65,7 +61,7 @@ async def _fetch_cropped(client: GibsClient, layer, date: str, bbox: BBox, rows:
 )
 async def color_matrix(
     bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
-    date: str | None = Query(None, description="YYYY-MM-DD; omit for latest available"),
+    date: str | None = Query(None, description="YYYY-MM-DD, 'latest', or omit for the previous completed UTC day"),
     layer: str | None = Query(None, description="True-color layer id (see /v1/layers)"),
     rows: int = Query(16, ge=1, le=256),
     cols: int = Query(16, ge=1, le=256),
@@ -76,7 +72,7 @@ async def color_matrix(
     box = deps.parse_bbox(bbox, settings)
     deps.validate_grid(rows, cols, settings)
     lyr = _resolve_truecolor_layer(layer)
-    concrete_date, resolved_from = deps.resolve_date(date, lyr.id, latest_dates)
+    concrete_date, resolved_from = deps.resolve_date(date, lyr.id, latest_dates, settings)
     cropped, source = await _fetch_cropped(client, lyr, concrete_date, box, rows, cols)
     matrix = colors.to_grid(cropped, rows, cols)
     return ColorMatrixResponse(
@@ -88,6 +84,7 @@ async def color_matrix(
         cols=cols,
         cell_size_deg=[box.width / cols, box.height / rows],
         source=source,
+        observation_quality=asdict(quality.color_quality(cropped, source.tiles_missing, source.tiles_fetched)),
         matrix=matrix,
     )
 
@@ -101,7 +98,7 @@ async def color_matrix(
 )
 async def color(
     bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
-    date: str | None = Query(None, description="YYYY-MM-DD; omit for latest available"),
+    date: str | None = Query(None, description="YYYY-MM-DD, 'latest', or omit for the previous completed UTC day"),
     layer: str | None = Query(None, description="True-color layer id (see /v1/layers)"),
     client: GibsClient = Depends(deps.get_client),
     latest_dates=Depends(deps.get_latest_dates),
@@ -109,7 +106,7 @@ async def color(
     settings = client.settings
     box = deps.parse_bbox(bbox, settings)
     lyr = _resolve_truecolor_layer(layer)
-    concrete_date, resolved_from = deps.resolve_date(date, lyr.id, latest_dates)
+    concrete_date, resolved_from = deps.resolve_date(date, lyr.id, latest_dates, settings)
     cropped, source = await _fetch_cropped(client, lyr, concrete_date, box, rows=1, cols=1)
     rgb = colors.average(cropped)
     return ColorResponse(
@@ -120,6 +117,7 @@ async def color(
         rgb=list(rgb),
         hex=colors.rgb_to_hex(rgb),
         source=source,
+        observation_quality=asdict(quality.color_quality(cropped, source.tiles_missing, source.tiles_fetched)),
     )
 
 

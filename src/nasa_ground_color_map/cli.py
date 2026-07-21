@@ -34,6 +34,8 @@ from .gibs.client import GibsClient
 from .gibs.tilemath import BBox, parse_bbox_string, pixel_deg, plan_tiles
 from .processing import colors, mosaic
 from .processing import snow as snow_mod
+from .processing import quality
+from .processing.temporal import color_rank_key, composite_rgb, inclusive_dates, snow_rank_key
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
@@ -194,7 +196,14 @@ def resolve_date(date_arg: str | None, layer_id: str, settings: Settings) -> tup
             return datetime.strptime(date_arg, "%Y-%m-%d").date().isoformat(), "request"
         except ValueError:
             raise SystemExit("error: date must be YYYY-MM-DD (or 'latest')")
-    return latest_date_cached(settings, layer_id), "latest"
+    advertised = latest_date_cached(settings, layer_id)
+    if date_arg == "latest":
+        return advertised, "latest"
+    target = datetime.now(timezone.utc).date() - timedelta(days=settings.default_imagery_lag_days)
+    advertised_day = datetime.strptime(advertised, "%Y-%m-%d").date()
+    if advertised_day < target:
+        return advertised, "latest_available_fallback"
+    return target.isoformat(), "previous_completed_day"
 
 
 def latest_date_cached(settings: Settings, layer_id: str) -> str:
@@ -253,12 +262,6 @@ async def sample(settings: Settings, layer, date: str, box, rows: int, cols: int
     ) as http:
         client = GibsClient(settings, cache, http)
         tiles = await client.fetch_plan(layer, date, plan, on_tile=on_tile)
-    if all(v is None for v in tiles.values()):
-        PROGRESS.clear()
-        raise SystemExit(
-            f"error: GIBS returned no imagery for {layer.id} on {date} "
-            "(date outside coverage, or GIBS unavailable)"
-        )
     PROGRESS.update(f"stitching {plan.n_cols}x{plan.n_rows} tiles and sampling colors…")
     cropped, missing = mosaic.stitch_and_crop(tiles, plan, mode=mode)
     PROGRESS.clear()
@@ -350,16 +353,14 @@ def resolve_truecolor_layer(layer_id: str | None):
     return layer
 
 
-def warn_if_all_black(cells) -> None:
-    """A pure-black true-color result is almost never real ground — it's a
-    satellite swath gap or night-side imagery. Say so instead of leaving the
-    user staring at a black square."""
-    if all(tuple(c) == (0, 0, 0) for c in cells):
-        print(
-            "note: result is pure black — likely a satellite swath gap or night imagery "
-            "for this date/area; try an adjacent --date or another --layer (see 'layers')",
-            file=sys.stderr,
-        )
+def quality_action(status: str) -> str:
+    if status == "usable":
+        return ""
+    return " Suggested action: try --date latest, choose an exact date, or wait for the next completed day."
+
+
+def print_quality(observation_quality) -> None:
+    print(f"quality {observation_quality.status.upper()} — {observation_quality.reasons[0]}" + quality_action(observation_quality.status), file=sys.stderr)
 
 
 def source_info(plan, missing, layer) -> dict:
@@ -382,11 +383,13 @@ def cmd_color(args) -> None:
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, 1, 1, "RGB"))
     rgb = colors.average(cropped)
     hex_code = colors.rgb_to_hex(rgb)
+    observation_quality = quality.color_quality(cropped, missing, plan.tile_count)
     if args.json:
         payload = {
             "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
             "date": date, "date_resolved_from": resolved_from, "layer": layer.id,
             "rgb": list(rgb), "hex": hex_code, "source": source_info(plan, missing, layer),
+            "observation_quality": observation_quality.__dict__,
         }
         if place:
             payload["zip"] = place
@@ -396,7 +399,8 @@ def cmd_color(args) -> None:
     info = [
         f"rgb  {rgb[0]:>3} {rgb[1]:>3} {rgb[2]:>3}",
         f"hex  {hex_code}",
-        f"date {date}" + (" (latest)" if resolved_from == "latest" else ""),
+        f"date {date} ({resolved_from})",
+        f"quality {observation_quality.status}",
     ]
     if place:
         info.append(f"area {place_label(place)}")
@@ -406,9 +410,7 @@ def cmd_color(args) -> None:
     else:
         for text in info:
             print(text)
-    if missing:
-        print(f"note: {missing}/{plan.tile_count} tiles missing (filled black)", file=sys.stderr)
-    warn_if_all_black([rgb])
+    print_quality(observation_quality)
 
 
 def cmd_matrix(args) -> None:
@@ -418,12 +420,14 @@ def cmd_matrix(args) -> None:
     date, resolved_from = resolve_date(args.date, layer.id, settings)
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, args.rows, args.cols, "RGB"))
     matrix = colors.to_grid(cropped, args.rows, args.cols)
+    observation_quality = quality.color_quality(cropped, missing, plan.tile_count)
     if args.json:
         payload = {
             "bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat],
             "date": date, "date_resolved_from": resolved_from, "layer": layer.id,
             "rows": args.rows, "cols": args.cols, "origin": "northwest",
             "source": source_info(plan, missing, layer), "matrix": matrix,
+            "observation_quality": observation_quality.__dict__,
         }
         if place:
             payload["zip"] = place
@@ -442,11 +446,10 @@ def cmd_matrix(args) -> None:
         for line in frame_matrix(body, box, grid_width):
             print(line)
     loc = f"{place_label(place)} | " if place else ""
-    print(f"{loc}{args.rows}x{args.cols} cells, north at top | {date}"
-          + (" (latest)" if resolved_from == "latest" else "")
+    print(f"{loc}{args.rows}x{args.cols} cells, north at top | {date} ({resolved_from})"
           + f" | zoom {plan.zoom}, {plan.tile_count} tiles"
           + (f", {missing} missing" if missing else ""))
-    warn_if_all_black(cell for row in matrix for cell in row)
+    print_quality(observation_quality)
 
 
 def cmd_snow(args) -> None:
@@ -456,6 +459,10 @@ def cmd_snow(args) -> None:
     date, resolved_from = resolve_date(args.date, layer.id, settings)
     cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, args.rows, args.cols, "P"))
     stats = snow_mod.analyze(cropped)
+    observation_quality = quality.snow_quality(
+        observable_fraction=stats.valid_fraction, cloud_fraction=stats.cloud_fraction,
+        water_fraction=stats.water_fraction, tiles_missing=missing, tiles_fetched=plan.tile_count,
+    )
     grid = snow_mod.analyze_grid(cropped, args.rows, args.cols) if args.rows * args.cols > 1 else None
     if args.json:
         payload = {
@@ -464,6 +471,7 @@ def cmd_snow(args) -> None:
             "snow_fraction": stats.snow_fraction, "valid_fraction": stats.valid_fraction,
             "cloud_fraction": stats.cloud_fraction, "water_fraction": stats.water_fraction,
             "matrix": grid, "source": source_info(plan, missing, layer),
+            "observation_quality": observation_quality.__dict__,
         }
         if place:
             payload["zip"] = place
@@ -478,14 +486,14 @@ def cmd_snow(args) -> None:
     else:
         tile = ""
     print(f"{tile}snow {frac}  (valid {stats.valid_fraction:.1%}, cloud {stats.cloud_fraction:.1%}, "
-          f"water {stats.water_fraction:.1%})  {date}"
-          + (" (latest)" if resolved_from == "latest" else ""))
+          f"water {stats.water_fraction:.1%})  {date} ({resolved_from})")
     if grid:
         for line in render_snow_matrix(grid, color=color):
             print(line)
         if color:
             legend = "".join(_bg(snow_fraction_color(f / 4)) + "  " for f in range(5))
             print(f"legend: bare {legend}{RESET} snow, {DIM}··{RESET} = no data (cloud/night/water)")
+    print_quality(observation_quality)
 
 
 def cmd_zip(args) -> None:
@@ -528,6 +536,115 @@ def cmd_layers(args) -> None:
         print(f"{r[0]:<{width}}  {r[1]:<9} {r[2]:<9} latest {r[3]}{default}")
 
 
+def _cli_date_window(end_arg: str | None, days: int, layer_id: str, settings: Settings):
+    end = datetime.strptime(resolve_date(end_arg, layer_id, settings)[0], "%Y-%m-%d").date()
+    return inclusive_dates(end - timedelta(days=days - 1), end)
+
+
+def cmd_history(args) -> None:
+    settings = build_settings(); box, place = parse_area_arg(args.bbox, args.radius_km, settings)
+    layer = resolve_truecolor_layer(args.layer); dates = _cli_date_window(args.end, args.days, layer.id, settings)
+    observations = []
+    for day in dates:
+        try:
+            cropped, plan, missing = asyncio.run(sample(settings, layer, day, box, 1, 1, "RGB"))
+            rgb = colors.average(cropped); q = quality.color_quality(cropped, missing, plan.tile_count)
+            observations.append({"date": day, "color": {"rgb": list(rgb), "hex": colors.rgb_to_hex(rgb), "observation_quality": q.__dict__, "source": source_info(plan, missing, layer)}})
+        except Exception as exc: observations.append({"date": day, "error": {"color": str(exc)}})
+    payload = {"bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat], "start": dates[0], "end": dates[-1], "metrics": ["color"], "observations": observations}
+    if place: payload["zip"] = place
+    if args.json: print(json.dumps(payload)); return
+    for item in observations:
+        if "error" in item: print(f"{item['date']}  error {item['error']['color']}")
+        else:
+            obs = item["color"]; print(f"{item['date']}  {obs['hex']}  {obs['observation_quality']['status']}")
+
+
+def cmd_best(args) -> None:
+    settings = build_settings(); box, place = parse_area_arg(args.bbox, args.radius_km, settings)
+    layer = layer_registry.SNOW_LAYER if args.metric == "snow" else resolve_truecolor_layer(args.layer)
+    candidates = []
+    for day in _cli_date_window(args.end, args.lookback_days, layer.id, settings):
+        cropped, plan, missing = asyncio.run(sample(settings, layer, day, box, 1, 1, "P" if args.metric == "snow" else "RGB"))
+        if args.metric == "color":
+            rgb = colors.average(cropped); q = quality.color_quality(cropped, missing, plan.tile_count)
+            candidates.append({"date": day, "rgb": list(rgb), "hex": colors.rgb_to_hex(rgb), "observation_quality": q.__dict__, "source": source_info(plan, missing, layer)})
+        else:
+            stats = snow_mod.analyze(cropped); q = quality.snow_quality(observable_fraction=stats.valid_fraction, cloud_fraction=stats.cloud_fraction, water_fraction=stats.water_fraction, tiles_missing=missing, tiles_fetched=plan.tile_count)
+            candidates.append({"date": day, "snow_fraction": stats.snow_fraction, "valid_fraction": stats.valid_fraction, "cloud_fraction": stats.cloud_fraction, "observation_quality": q.__dict__, "source": source_info(plan, missing, layer)})
+    ranked = sorted(candidates, key=snow_rank_key if args.metric == "snow" else color_rank_key)
+    payload = {"metric": args.metric, "selected": ranked[0], "candidates": [{"date": x["date"], "observation_quality": x["observation_quality"]} for x in ranked]}
+    if args.json: print(json.dumps(payload)); return
+    value = ranked[0].get("hex", f"snow {ranked[0].get('snow_fraction')}")
+    print(f"selected {ranked[0]['date']}  {value}  quality {ranked[0]['observation_quality']['status']}")
+    for item in ranked: print(f"  {item['date']}  {item['observation_quality']['status']}")
+
+
+def cmd_composite(args) -> None:
+    settings = build_settings(); box, place = parse_area_arg(args.bbox, args.radius_km, settings); layer = resolve_truecolor_layer(args.layer)
+    attempted = _cli_date_window(args.end, args.days, layer.id, settings); grids, used = [], []
+    for day in attempted:
+        cropped, plan, missing = asyncio.run(sample(settings, layer, day, box, args.rows, args.cols, "RGB"))
+        q = quality.color_quality(cropped, missing, plan.tile_count)
+        if q.status != "unusable": grids.append(colors.to_grid(cropped, args.rows, args.cols)); used.append(day)
+    matrix, counts, rgb = composite_rgb(grids, minimum_observations=settings.min_composite_observations)
+    payload = {"bbox": [box.min_lon, box.min_lat, box.max_lon, box.max_lat], "start": attempted[0], "end": attempted[-1], "layer": layer.id,
+               "rows": args.rows, "cols": args.cols, "matrix": matrix, "observation_counts": counts, "rgb": rgb,
+               "hex": colors.rgb_to_hex(tuple(rgb)) if rgb else None, "dates_attempted": attempted, "dates_used": used}
+    if args.json: print(json.dumps(payload)); return
+    printable = [[cell or [0, 0, 0] for cell in row] for row in matrix]
+    if use_color(args.color):
+        for line in frame_matrix(render_matrix(printable), box, args.cols * 2): print(line)
+    else:
+        for row in matrix: print(" ".join(colors.rgb_to_hex(tuple(cell)) if cell else "-------" for cell in row))
+    print(f"composite {payload['hex'] or 'n/a'} from {len(used)}/{len(attempted)} dates")
+
+
+def cmd_area(args) -> None:
+    from .api.routes_areas import _parse_gpx, _parse_kml
+    from .processing.geometry import normalize_geometry
+    path = Path(args.file); data = path.read_bytes(); suffix = path.suffix.lower()
+    if suffix in {".json", ".geojson"}: raw = json.loads(data)
+    elif suffix == ".kml": raw = _parse_kml(data, args.corridor_km)
+    elif suffix == ".gpx": raw = _parse_gpx(data, args.corridor_km)
+    else: raise SystemExit("error: area file must be GeoJSON, KML, or GPX")
+    geometry, wraps = normalize_geometry(raw)
+    payload = {"type": "Feature", "properties": {}, "geometry": geometry, "wraps_antimeridian": wraps}
+    print(json.dumps(payload, indent=None if args.json else 2))
+
+
+def cmd_export(args) -> None:
+    from .processing.exports import raster_bundle
+    from .processing.geometry import mask_grid, normalize_geometry
+    settings = build_settings(); area_path = Path(args.area); geometry = None
+    if area_path.is_file():
+        from .api.routes_areas import _parse_gpx, _parse_kml
+        data = area_path.read_bytes(); suffix = area_path.suffix.lower()
+        if suffix in {".json", ".geojson"}: raw = json.loads(data)
+        elif suffix == ".kml": raw = _parse_kml(data, 2.0)
+        elif suffix == ".gpx": raw = _parse_gpx(data, 2.0)
+        else: raise SystemExit("error: area file must be GeoJSON, KML, or GPX")
+        geometry, wraps = normalize_geometry(raw)
+        if wraps: raise SystemExit("error: CLI export currently requires one normalized hemisphere at a time")
+        from shapely.geometry import shape
+        bounds = shape(geometry).bounds; box = BBox(*bounds)
+    else: box, _ = parse_area_arg(args.area, args.radius_km, settings)
+    layer = resolve_truecolor_layer(args.layer)
+    date, resolved = resolve_date(args.date, layer.id, settings)
+    cropped, plan, missing = asyncio.run(sample(settings, layer, date, box, args.rows, args.cols, "RGB")); matrix = colors.to_grid(cropped, args.rows, args.cols)
+    bbox = [box.min_lon, box.min_lat, box.max_lon, box.max_lat]; kind = {"png": "png-bundle", "geotiff": "geotiff-bundle", "cog": "cog-bundle"}[args.format]
+    if geometry: matrix = mask_grid(matrix, geometry, bbox)
+    metadata = {"bbox": bbox, "crs": "EPSG:4326", "date": date, "date_resolved_from": resolved, "layer": layer.id,
+                "quality": quality.color_quality(cropped, missing, plan.tile_count).__dict__, "attribution": "NASA GIBS, NASA/GSFC/ESDIS"}
+    Path(args.output).write_bytes(raster_bundle(matrix, bbox, metadata, kind)); print(args.output)
+
+
+def cmd_refresh_environment(args) -> None:
+    from .environment.refresh import refresh
+    output = args.output or Path(__file__).with_name("environment") / "pinned_colormaps.json"
+    print(refresh(output))
+
+
 def terminal_width() -> int:
     try:
         return os.get_terminal_size().columns
@@ -552,7 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     def common(p, grid_defaults=None):
         p._negative_number_matcher = bbox_matcher
         p.add_argument("bbox", help="minLon,minLat,maxLon,maxLat (WGS84 degrees), or a US ZIP code")
-        p.add_argument("--date", help="YYYY-MM-DD or 'latest' (default: latest available)")
+        p.add_argument("--date", help="YYYY-MM-DD or 'latest' (default: previous completed UTC day)")
         p.add_argument("--radius-km", type=float, default=5.0, metavar="KM",
                        help="box half-size when the area is given as a ZIP code (default 5)")
         p.add_argument("--json", action="store_true", help="print JSON (same shape as the API)")
@@ -590,6 +707,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_layers.add_argument("--offline", action="store_true", help="skip latest-date lookup")
     p_layers.set_defaults(func=cmd_layers)
 
+    p_history = sub.add_parser("history", help="daily quality and color trend")
+    common(p_history); p_history.add_argument("--end", help="window end YYYY-MM-DD"); p_history.add_argument("--days", type=int, default=7)
+    p_history.add_argument("--layer"); p_history.set_defaults(func=cmd_history)
+
+    p_best = sub.add_parser("best", help="select the best recent observation")
+    common(p_best); p_best.add_argument("--metric", choices=["color", "snow"], default="color"); p_best.add_argument("--end")
+    p_best.add_argument("--lookback-days", type=int, default=7); p_best.add_argument("--layer"); p_best.set_defaults(func=cmd_best)
+
+    p_composite = sub.add_parser("composite", help="median composite of recent observations")
+    common(p_composite, grid_defaults=(16, 16)); p_composite.add_argument("--end"); p_composite.add_argument("--days", type=int, default=7)
+    p_composite.add_argument("--layer"); p_composite.set_defaults(func=cmd_composite)
+
+    p_area = sub.add_parser("area", help="normalize a GeoJSON, KML, or GPX file")
+    p_area.add_argument("file"); p_area.add_argument("--corridor-km", type=float, default=2.0); p_area.add_argument("--json", action="store_true"); p_area.set_defaults(func=cmd_area)
+
+    p_export = sub.add_parser("export", help="export a bbox or ZIP as a raster bundle")
+    p_export.add_argument("area", help="bbox or ZIP"); p_export.add_argument("--format", choices=["png", "geotiff", "cog"], required=True)
+    p_export.add_argument("--output", required=True); p_export.add_argument("--date"); p_export.add_argument("--layer"); p_export.add_argument("--rows", type=int, default=256); p_export.add_argument("--cols", type=int, default=256); p_export.add_argument("--radius-km", type=float, default=5.0)
+    p_export.set_defaults(func=cmd_export)
+
+    p_refresh = sub.add_parser("refresh-environment-metadata", help="deliberately refresh pinned official GIBS colormaps")
+    p_refresh.add_argument("--output", help="destination JSON (default: packaged pinned_colormaps.json)")
+    p_refresh.set_defaults(func=cmd_refresh_environment)
+
     return parser
 
 
@@ -602,6 +743,9 @@ def main(argv: list[str] | None = None) -> None:
     radius = getattr(args, "radius_km", None)
     if radius is not None and not (0 < radius <= 300):
         raise SystemExit("error: --radius-km must be in (0, 300]")
+    for name, maximum in (("days", 31 if getattr(args, "command", None) == "history" else 14), ("lookback_days", 14)):
+        value = getattr(args, name, None)
+        if value is not None and not (1 <= value <= maximum): raise SystemExit(f"error: --{name.replace('_', '-')} must be in [1, {maximum}]")
     try:
         args.func(args)
     finally:

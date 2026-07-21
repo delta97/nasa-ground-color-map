@@ -7,7 +7,7 @@ services:
       - path: .env
         required: false
     volumes:
-      - tile-cache:/data/tile-cache
+      - ground-data:/data
 
 volumes:
-  tile-cache:
+  ground-data:

@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir .
 
 RUN useradd --create-home appuser \
     && mkdir -p /data/tile-cache \
-    && chown -R appuser:appuser /data/tile-cache
+    && chown -R appuser:appuser /data
 USER appuser
 
 ENV CACHE_DIR=/data/tile-cache

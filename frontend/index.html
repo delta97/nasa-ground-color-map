@@ -135,6 +135,8 @@ tailwind.config = {
 
   /* ---- matrix canvas ---- */
   #matrixCanvas { image-rendering: pixelated; width: 100%; height: auto; display: block; cursor: crosshair; border: 1px solid #1d2c42; }
+  #trendCanvas { width: 100%; height: 92px; display:block; border:1px solid #1d2c42; background:#060b13; }
+  .quality-day { height:10px; flex:1; min-width:8px; cursor:pointer; }
 
   /* ---- log ---- */
   #log { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; line-height: 1.7; }
@@ -222,8 +224,12 @@ tailwind.config = {
 
       <div class="grid grid-cols-2 gap-3 mb-3">
         <label class="block">
-          <span class="text-[9px] tracking-[.2em] text-dim block mb-1">DATE (UTC) — BLANK = LATEST</span>
-          <input id="dateInput" type="date" class="cfield" />
+          <span class="text-[9px] tracking-[.2em] text-dim block mb-1">DATE MODE (UTC)</span>
+          <select id="dateMode" class="cfield">
+            <option value="previous_completed_day" selected>Previous completed day</option>
+            <option value="latest">Latest advertised</option>
+            <option value="request">Specific date</option>
+          </select>
         </label>
         <label class="block">
           <span class="text-[9px] tracking-[.2em] text-dim block mb-1">GRID RESOLUTION</span>
@@ -237,6 +243,10 @@ tailwind.config = {
           </select>
         </label>
       </div>
+      <label id="specificDateWrap" class="block mb-3 hidden">
+        <span class="text-[9px] tracking-[.2em] text-dim block mb-1">SPECIFIC DATE (UTC)</span>
+        <input id="dateInput" type="date" class="cfield" />
+      </label>
       <label class="block mb-4">
         <span class="text-[9px] tracking-[.2em] text-dim block mb-1">IMAGERY LAYER</span>
         <select id="layerSel" class="cfield">
@@ -248,6 +258,55 @@ tailwind.config = {
         <i class="fa-solid fa-satellite"></i><span id="acquireLabel">Acquire Ground Data</span>
       </button>
       <div id="acquireBar" class="acquiring h-1.5 mt-2 hidden"></div>
+    </div>
+
+    <!-- TEMPORAL ANALYSIS -->
+    <div class="panel boot p-4" style="animation-delay:.20s">
+      <div class="panel-title mb-3"><i class="fa-solid fa-chart-line"></i>7-Day Temporal Analysis</div>
+      <div id="qualityStrip" class="flex gap-1 mb-2" title="Daily quality; click a day to select it"></div>
+      <canvas id="trendCanvas" width="390" height="92"></canvas>
+      <div class="grid grid-cols-2 gap-2 mt-3">
+        <button id="bestBtn" class="cbtn justify-center" disabled><i class="fa-solid fa-ranking-star"></i>Best Scene</button>
+        <button id="compositeBtn" class="cbtn justify-center" disabled><i class="fa-solid fa-layer-group"></i>Composite</button>
+      </div>
+      <div id="temporalReadout" class="font-mono text-[10px] text-dim mt-2">Acquire a target to load history.</div>
+    </div>
+
+    <!-- AREA / EXPORT -->
+    <div class="panel boot p-4" style="animation-delay:.22s">
+      <div class="panel-title mb-3"><i class="fa-solid fa-draw-polygon"></i>Area & GIS Export</div>
+      <input id="areaFile" type="file" accept=".geojson,.json,.kml,.gpx" class="cfield mb-2" />
+      <div class="grid grid-cols-[1fr_90px] gap-2 mb-2">
+        <select id="exportFormat" class="cfield"><option value="png-bundle">PNG bundle</option><option value="geotiff-bundle">GeoTIFF bundle</option><option value="cog-bundle">COG bundle</option></select>
+        <input id="corridorKm" class="cfield" type="number" min="0.1" max="100" step="0.1" value="2" title="Corridor width, km" />
+      </div>
+      <button id="exportBtn" class="cbtn w-full justify-center" disabled><i class="fa-solid fa-file-export"></i>Export Target</button>
+      <div id="areaReadout" class="font-mono text-[10px] text-dim mt-2">BBox exports are available after selecting a target.</div>
+    </div>
+
+    <!-- MONITORING ADMIN -->
+    <div id="monitorPanel" class="panel boot p-4 hidden" style="animation-delay:.23s">
+      <div class="panel-title mb-3"><i class="fa-solid fa-bell"></i>Environmental Monitoring</div>
+      <input id="adminToken" type="password" autocomplete="off" class="cfield mb-2" placeholder="Monitoring bearer token" />
+      <div class="grid grid-cols-2 gap-2 mb-2">
+        <input id="regionName" class="cfield" placeholder="Region name" />
+        <select id="monitorProduct" class="cfield">
+          <option value="ndvi">NDVI</option><option value="land-surface-temperature">Temperature</option>
+          <option value="flood">Flood</option><option value="thermal-anomalies">Thermal anomalies</option>
+          <option value="aerosol-index">Aerosol index</option><option value="soil-moisture">Soil moisture</option>
+        </select>
+        <select id="monitorMetric" class="cfield"></select>
+        <select id="monitorRule" class="cfield"><option value="above">Above</option><option value="below">Below</option><option value="absolute_change">Absolute change</option><option value="percentage_change">Percentage change</option><option value="quality_transition">Quality transition</option></select>
+        <input id="monitorThreshold" type="number" step="any" class="cfield" placeholder="Threshold" />
+        <input id="monitorHour" type="number" min="0" max="23" value="12" class="cfield" title="Daily UTC run hour" />
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <button id="createMonitorBtn" class="cbtn justify-center" disabled><i class="fa-solid fa-plus"></i>Save & Monitor</button>
+        <button id="refreshMonitorsBtn" class="cbtn justify-center"><i class="fa-solid fa-rotate"></i>Refresh</button>
+      </div>
+      <div id="monitorStatus" class="font-mono text-[10px] text-dim mt-2">Enter the admin token to load monitoring status.</div>
+      <div id="monitorList" class="font-mono text-[10px] mt-2 max-h-28 overflow-y-auto"></div>
+      <div id="eventList" class="font-mono text-[10px] mt-2 max-h-28 overflow-y-auto"></div>
     </div>
 
     <!-- COMPOSITE COLOR -->
@@ -264,7 +323,9 @@ tailwind.config = {
           </div>
           <div class="kv"><span class="k">RGB</span><span class="v" id="rgbVal">—</span></div>
           <div class="kv"><span class="k">DATE</span><span class="v" id="compDate">—</span></div>
+          <div class="kv"><span class="k">QUALITY</span><span class="v" id="colorQuality">—</span></div>
           <div class="kv"><span class="k">READS&nbsp;AS</span><span class="v" id="colorRead">—</span></div>
+          <button id="interpretBtn" class="cbtn !px-2 !py-1 hidden" title="Interpret this exact observation">Interpret this result</button>
         </div>
       </div>
     </div>
@@ -325,6 +386,7 @@ tailwind.config = {
       <div id="telemetry">
         <div class="kv"><span class="k">LAYER</span><span class="v" id="tLayer">—</span></div>
         <div class="kv"><span class="k">DATE&nbsp;RESOLVED</span><span class="v" id="tDate">—</span></div>
+        <div class="kv"><span class="k">OBSERVATION&nbsp;QUALITY</span><span class="v" id="tQuality">—</span></div>
         <div class="kv"><span class="k">WMTS&nbsp;ZOOM</span><span class="v" id="tZoom">—</span></div>
         <div class="kv"><span class="k">TILES&nbsp;FETCHED&nbsp;/&nbsp;MISSING</span><span class="v" id="tTiles">—</span></div>
         <div class="kv"><span class="k">NATIVE&nbsp;PIXEL</span><span class="v" id="tPixel">—</span></div>
@@ -368,8 +430,8 @@ function log(msg, cls = 'info') {
   $('log').scrollTop = $('log').scrollHeight;
 }
 
-async function fetchJson(url) {
-  const res = await fetch(url);
+async function fetchJson(url, init) {
+  const res = await fetch(url, init);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `${res.status} ${res.statusText}`);
   return body;
@@ -414,6 +476,11 @@ setInterval(() => { $('utcClock').textContent = new Date().toISOString().slice(1
   }
 })();
 $('dateInput').max = new Date().toISOString().slice(0, 10);
+$('dateMode').addEventListener('change', () => {
+  const specific = $('dateMode').value === 'request';
+  $('specificDateWrap').classList.toggle('hidden', !specific);
+  $('dateInput').required = specific;
+});
 
 /* ================= map ================= */
 const map = L.map('map', { zoomControl: true, worldCopyJump: false })
@@ -481,6 +548,7 @@ $('clearBtn').addEventListener('click', () => {
   ['bbW','bbS','bbE','bbN'].forEach(id => $(id).textContent = '—');
   $('bbSpan').textContent = 'no target — draw a bbox or use the current view';
   $('acquireBtn').disabled = true;
+  $('bestBtn').disabled = true; $('compositeBtn').disabled = true; $('exportBtn').disabled = true; $('createMonitorBtn').disabled = true;
   log('Target cleared', 'info');
 });
 
@@ -494,6 +562,7 @@ function setBBox(bounds) {
   $('bbSpan').textContent = `${spanLon.toFixed(2)}° lon × ${spanLat.toFixed(2)}° lat`;
   const tooBig = spanLon > MAX_SPAN_DEG || spanLat > MAX_SPAN_DEG;
   $('acquireBtn').disabled = tooBig;
+  $('bestBtn').disabled = tooBig; $('compositeBtn').disabled = tooBig; $('exportBtn').disabled = tooBig; $('createMonitorBtn').disabled = tooBig;
   if (tooBig) log(`BBox exceeds ${MAX_SPAN_DEG}° per-axis limit — draw a smaller area`, 'warn');
   else log(`Target locked: ${bbox.w},${bbox.s},${bbox.e},${bbox.n}`, 'ok');
 }
@@ -507,11 +576,14 @@ async function acquire() {
   if (!bbox) return;
   const bboxStr = `${bbox.w},${bbox.s},${bbox.e},${bbox.n}`;
   const grid = $('gridSel').value;
+  const dateMode = $('dateMode').value;
   const date = $('dateInput').value;
+  if (dateMode === 'request' && !date) { log('Choose a specific UTC date first', 'warn'); return; }
   const layer = $('layerSel').value;
 
   const base = new URLSearchParams({ bbox: bboxStr });
-  if (date) base.set('date', date);
+  if (dateMode === 'latest') base.set('date', 'latest');
+  if (dateMode === 'request') base.set('date', date);
 
   const pMatrix = new URLSearchParams(base); pMatrix.set('rows', grid); pMatrix.set('cols', grid);
   const pColor = new URLSearchParams(base);
@@ -521,13 +593,14 @@ async function acquire() {
   $('acquireBtn').disabled = true;
   $('acquireLabel').textContent = 'Acquiring Tiles…';
   $('acquireBar').classList.remove('hidden');
-  log(`Tasking GIBS — bbox=${bboxStr} grid=${grid}×${grid}${date ? ' date=' + date : ' date=latest'}`, 'info');
+  log(`Tasking GIBS — bbox=${bboxStr} grid=${grid}×${grid} date=${dateMode === 'request' ? date : dateMode}`, 'info');
 
   const [rMatrix, rColor, rSnow] = await Promise.allSettled([
     fetchJson(`${API}/v1/color-matrix?${pMatrix}`),
     fetchJson(`${API}/v1/color?${pColor}`),
     fetchJson(`${API}/v1/snow?${pSnow}`),
   ]);
+  loadHistory(bboxStr, layer);
 
   if (rColor.status === 'fulfilled') renderComposite(rColor.value);
   else log(`color: ${rColor.reason.message}`, 'err');
@@ -545,6 +618,52 @@ async function acquire() {
   $('acquireLabel').textContent = 'Acquire Ground Data';
   $('acquireBar').classList.add('hidden');
 }
+
+/* ================= temporal / GIS ================= */
+async function loadHistory(bboxStr, layer) {
+  const q = new URLSearchParams({bbox:bboxStr, metrics:'color'}); if (layer) q.set('layer', layer);
+  try {
+    const data = await fetchJson(`${API}/v1/history?${q}`);
+    const observations = data.observations.filter(x => x.color);
+    $('qualityStrip').innerHTML = observations.map(x => {
+      const s=x.color.observation_quality.status, color=s==='usable'?'#3ddc84':s==='suspect'?'#ffb000':'#ff5d5d';
+      return `<button class="quality-day" style="background:${color}" title="${x.date}: ${s}" data-date="${x.date}"></button>`;
+    }).join('');
+    $('qualityStrip').querySelectorAll('button').forEach(b => b.onclick=()=>{$('dateMode').value='request';$('dateMode').dispatchEvent(new Event('change'));$('dateInput').value=b.dataset.date;$('temporalReadout').textContent=`Selected ${b.dataset.date} for before/after comparison`;});
+    const canvas=$('trendCanvas'), ctx=canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.strokeStyle='#6fd3ff';ctx.lineWidth=2;ctx.beginPath();
+    observations.forEach((x,i)=>{const rgb=x.color.rgb, lum=(rgb[0]+rgb[1]+rgb[2])/765;const px=8+i*(canvas.width-16)/Math.max(1,observations.length-1),py=canvas.height-8-lum*(canvas.height-16);i?ctx.lineTo(px,py):ctx.moveTo(px,py);});ctx.stroke();
+    $('temporalReadout').textContent=`${observations.length} daily scenes · click quality strip to select a comparison date`;
+  } catch(e) { log(`history: ${e.message}`,'warn'); }
+}
+
+$('bestBtn').addEventListener('click', async()=>{if(!bbox)return;const q=new URLSearchParams({bbox:`${bbox.w},${bbox.s},${bbox.e},${bbox.n}`,metric:'color',lookback_days:'7'});if($('layerSel').value)q.set('layer',$('layerSel').value);try{const d=await fetchJson(`${API}/v1/best?${q}`);$('dateMode').value='request';$('dateMode').dispatchEvent(new Event('change'));$('dateInput').value=d.selected.date;$('temporalReadout').textContent=`Best scene selected: ${d.selected.date}`;log(`Best scene ${d.selected.date}`,'ok');}catch(e){log(e.message,'err')}});
+$('compositeBtn').addEventListener('click', async()=>{if(!bbox)return;const grid=$('gridSel').value,q=new URLSearchParams({bbox:`${bbox.w},${bbox.s},${bbox.e},${bbox.n}`,days:'7',rows:grid,cols:grid});if($('layerSel').value)q.set('layer',$('layerSel').value);try{const d=await fetchJson(`${API}/v1/composite?${q}`);renderMatrix({...d,matrix:d.matrix.map(row=>row.map(c=>c||[0,0,0]))});if(d.rgb)renderComposite({...d,date:`${d.start}…${d.end}`,date_resolved_from:'composite'});$('temporalReadout').textContent=`Composite used ${d.dates_used.length}/${d.dates_attempted.length} dates`;log('Composite overlay ready','ok');}catch(e){log(e.message,'err')}});
+$('areaFile').addEventListener('change', async e=>{const file=e.target.files[0];if(!file)return;const form=new FormData();form.append('file',file);form.append('corridor_km',$('corridorKm').value);try{const d=await fetchJson(`${API}/v1/areas/upload`,{method:'POST',body:form});$('areaReadout').textContent=`Normalized ${d.geometry.type}${d.wraps_antimeridian?' · crosses antimeridian':''}`;const b=d.bbox;if(b&&b[2]-b[0]<=MAX_SPAN_DEG)setBBox(L.latLngBounds([b[1],b[0]],[b[3],b[2]]));log('Area normalized','ok');}catch(err){log(err.message,'err')}});
+$('exportBtn').addEventListener('click',async()=>{if(!bbox)return;const body={bbox:`${bbox.w},${bbox.s},${bbox.e},${bbox.n}`,rows:+$('gridSel').value,cols:+$('gridSel').value,format:$('exportFormat').value,observation:{mode:'single',layer:$('layerSel').value}};try{const res=await fetch(`${API}/v1/exports`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!res.ok)throw new Error((await res.json()).detail);const a=document.createElement('a');a.href=URL.createObjectURL(await res.blob());a.download=`ground-color-${body.format}.zip`;a.click();URL.revokeObjectURL(a.href);log('GIS bundle exported','ok');}catch(e){log(e.message,'err')}});
+
+const PRODUCT_METRICS = {
+  'ndvi':['mean','min','max','valid_fraction'], 'land-surface-temperature':['mean','min','max','valid_fraction'],
+  'flood':['flooded_fraction','surface_water_fraction','cloud_fraction','no_data_fraction'],
+  'thermal-anomalies':['detection_count','maximum_fire_radiative_power','total_fire_radiative_power'],
+  'aerosol-index':['mean','min','max','valid_fraction'], 'soil-moisture':['mean','min','max','valid_fraction'],
+};
+function updateMonitorMetrics(){const metrics=PRODUCT_METRICS[$('monitorProduct').value]||[];$('monitorMetric').replaceChildren(...metrics.map(value=>{const option=document.createElement('option');option.value=value;option.textContent=value.replaceAll('_',' ');return option;}));}
+updateMonitorMetrics(); $('monitorProduct').addEventListener('change',updateMonitorMetrics);
+$('monitorRule').addEventListener('change',()=>{$('monitorThreshold').disabled=$('monitorRule').value==='quality_transition';});
+function adminHeaders(json=false){const headers={Authorization:`Bearer ${$('adminToken').value}`};if(json)headers['Content-Type']='application/json';return headers;}
+async function refreshMonitoring(){if(!$('adminToken').value)return;try{
+  const [status,monitors,events]=await Promise.all([
+    fetchJson(`${API}/v1/monitoring/status`,{headers:adminHeaders()}),
+    fetchJson(`${API}/v1/monitors`,{headers:adminHeaders()}),
+    fetchJson(`${API}/v1/monitor-events?limit=20`,{headers:adminHeaders()}),
+  ]);
+  $('monitorStatus').textContent=`DB ${status.database_healthy?'healthy':'error'} · scheduler ${status.scheduler_healthy?'healthy':'error'} · ${status.pending_deliveries} pending deliveries`;
+  $('monitorList').replaceChildren();
+  for(const monitor of monitors.items){const row=document.createElement('div');row.className='flex items-center gap-1 border-t border-line py-1';const label=document.createElement('span');label.className='flex-1 text-slate-300';label.textContent=`#${monitor.id} ${monitor.product} · ${monitor.metric}`;const run=document.createElement('button');run.className='cbtn !px-1.5 !py-0.5';run.textContent='RUN';run.onclick=async()=>{try{const result=await fetchJson(`${API}/v1/monitors/${monitor.id}/run`,{method:'POST',headers:adminHeaders(true),body:'{}'});log(`Monitor #${monitor.id}: ${result.status}`,'ok');await refreshMonitoring();}catch(e){log(`monitor run: ${e.message}`,'err')}};const history=document.createElement('button');history.className='cbtn !px-1.5 !py-0.5';history.textContent='HISTORY';history.onclick=async()=>{try{const data=await fetchJson(`${API}/v1/monitors/${monitor.id}/observations`,{headers:adminHeaders()});$('eventList').textContent=data.items.map(x=>`${x.observation_date}  ${x.quality}  ${x.value??'n/a'}`).join('\n')||'No observations';}catch(e){log(e.message,'err')}};row.append(label,run,history);$('monitorList').append(row);}
+  $('eventList').textContent=events.items.map(x=>`${x.created_at}  #${x.monitor_id} ${x.event_type}`).join('\n')||'No monitor events';
+}catch(e){$('monitorStatus').textContent=e.message;log(`monitoring: ${e.message}`,'err')}}
+$('refreshMonitorsBtn').addEventListener('click',refreshMonitoring);$('adminToken').addEventListener('change',refreshMonitoring);
+$('createMonitorBtn').addEventListener('click',async()=>{if(!bbox||!$('adminToken').value)return;const name=$('regionName').value.trim();if(!name){log('Enter a region name','warn');return;}const geometry={type:'Polygon',coordinates:[[[bbox.w,bbox.s],[bbox.e,bbox.s],[bbox.e,bbox.n],[bbox.w,bbox.n],[bbox.w,bbox.s]]]};try{const region=await fetchJson(`${API}/v1/regions`,{method:'POST',headers:adminHeaders(true),body:JSON.stringify({name,geometry})});const quality=$('monitorRule').value==='quality_transition';const monitor={region_id:region.id,product:$('monitorProduct').value,metric:$('monitorMetric').value,rule_type:$('monitorRule').value,threshold:quality?null:Number($('monitorThreshold').value),run_hour:Number($('monitorHour').value),enabled:true};if(!quality&&!Number.isFinite(monitor.threshold))throw new Error('Enter a numeric threshold');await fetchJson(`${API}/v1/monitors`,{method:'POST',headers:adminHeaders(true),body:JSON.stringify(monitor)});log(`Saved ${name} and created monitor`,'ok');await refreshMonitoring();}catch(e){log(`create monitor: ${e.message}`,'err')}});
 
 /* ================= composite ================= */
 function describeColor([r, g, b]) {
@@ -564,7 +683,9 @@ function renderComposite(d) {
   $('swatch').style.background = d.hex;
   $('hexVal').textContent = d.hex;
   $('rgbVal').textContent = d.rgb.join(', ');
-  $('compDate').textContent = `${d.date}${d.date_resolved_from === 'latest' ? ' (latest)' : ''}`;
+  $('compDate').textContent = `${d.date} (${d.date_resolved_from})`;
+  $('colorQuality').textContent = d.observation_quality.status.toUpperCase();
+  $('colorQuality').className = `v ${d.observation_quality.status === 'usable' ? 'text-mint' : d.observation_quality.status === 'suspect' ? 'text-amber' : 'text-alert'}`;
   $('colorRead').textContent = describeColor(d.rgb);
   $('copyHex').classList.remove('hidden');
   $('copyHex').onclick = () => {
@@ -679,19 +800,18 @@ function renderSnow(d) {
 
   const note = $('snowNote');
   note.classList.remove('hidden');
-  if (d.snow_fraction === null) {
-    note.innerHTML = `<i class="fa-solid fa-circle-exclamation text-alert mr-1"></i>No observable land pixels on ${d.date} — night pass, heavy cloud, or open water.`;
-  } else if (d.valid_fraction < 0.3) {
-    note.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-amber mr-1"></i>Only ${pct(d.valid_fraction)} of the box was observable on ${d.date} — treat the snow reading as low-confidence.`;
-  } else {
-    note.innerHTML = `<i class="fa-solid fa-circle-check text-mint mr-1"></i>${pct(d.valid_fraction)} observable on ${d.date} — reading is representative.`;
-  }
+  const q = d.observation_quality;
+  const qColor = q.status === 'usable' ? 'text-mint' : q.status === 'suspect' ? 'text-amber' : 'text-alert';
+  note.innerHTML = `<i class="fa-solid fa-circle-exclamation ${qColor} mr-1"></i>${q.status.toUpperCase()}: ${q.reasons.join(' ')}${q.status === 'usable' ? '' : ' Try Latest advertised, select an exact date, or wait for the next completed day.'}`;
 }
 
 /* ================= telemetry ================= */
 function renderTelemetry(d) {
   $('tLayer').textContent = d.layer.replace(/_CorrectedReflectance_TrueColor/, '');
   $('tDate').textContent = `${d.date} (${d.date_resolved_from})`;
+  const q = d.observation_quality;
+  $('tQuality').textContent = `${q.status.toUpperCase()} — ${q.reasons[0]}`;
+  if (q.status !== 'usable') log(`Observation quality ${q.status}: ${q.reasons.join(' ')}`, 'warn');
   $('tZoom').textContent = `${d.source.zoom}${d.source.zoom_degraded ? ' · DEGRADED' : ''}`;
   $('tTiles').textContent = `${d.source.tiles_fetched} / ${d.source.tiles_missing}`;
   $('tPixel').textContent = `${d.source.native_pixel_deg.toExponential(2)}°`;
@@ -699,6 +819,30 @@ function renderTelemetry(d) {
   if (d.source.zoom_degraded) log('Zoom degraded to respect tile budget — colors are coarser than requested', 'warn');
   if (d.source.tiles_missing > 0) log(`${d.source.tiles_missing} tile(s) missing — rendered as black fill`, 'warn');
 }
+
+$('interpretBtn').addEventListener('click', async () => {
+  if (!lastMatrix) return;
+  const token = window.prompt('Interpretation access token (used only for this request)');
+  if (!token) return;
+  const question = window.prompt('Optional question about this observation') || undefined;
+  try {
+    const result = await fetchJson(`${API}/v1/interpret`, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Interpretation-Token': token},
+      body: JSON.stringify({
+        bbox: lastMatrix.bbox.join(','), date_mode: 'request', date: lastMatrix.date,
+        layer: lastMatrix.layer, rows: lastMatrix.rows, cols: lastMatrix.cols, question,
+      }),
+    });
+    log(`Interpretation (${result.interpretation.confidence}): ${result.interpretation.summary}`, 'info');
+  } catch (e) { log(`interpretation: ${e.message}`, 'err'); }
+});
+(async () => {
+  try {
+    const features = await fetchJson(`${API}/v1/features`);
+    if (features.interpretation) $('interpretBtn').classList.remove('hidden');
+    if (features.monitoring) $('monitorPanel').classList.remove('hidden');
+  } catch (_) { /* leave optional capability hidden */ }
+})();
 
 log('Console initialized — draw a bounding box to begin', 'info');
 </script>
